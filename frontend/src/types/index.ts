@@ -123,23 +123,42 @@ export interface BenchmarkRunResult {
   cuda_fallback?: boolean;
   elapsed_seconds?: number;
   speedup?: number;
-  norm_wer?: number;
-  norm_cer?: number;
-  norm_sub?: number;
-  norm_del?: number;
-  norm_ins?: number;
-  norm_hits?: number;
-  raw_wer?: number;
-  raw_cer?: number;
-  raw_sub?: number;
-  raw_del?: number;
-  raw_ins?: number;
+  is_verified?: boolean;
+  verification_notice?: string;
+  norm_wer?: number | null;
+  norm_cer?: number | null;
+  norm_sub?: number | null;
+  norm_del?: number | null;
+  norm_ins?: number | null;
+  norm_hits?: number | null;
+  raw_wer?: number | null;
+  raw_cer?: number | null;
+  raw_sub?: number | null;
+  raw_del?: number | null;
+  raw_ins?: number | null;
   predicted_text?: string;
   word_alignment?: WordAlignmentOp[];
 }
 
+export interface BenchmarkSample {
+  sample_id: string;
+  name: string;
+  start_time: number;
+  end_time: number;
+  duration: number;
+  audio_url: string;
+  status: 'VERIFIED' | 'UNVERIFIED';
+  verification_badge: string;
+  has_human_reference: boolean;
+  word_count: number;
+  description: string;
+}
+
 export interface BenchmarkReference {
+  sample_id?: string;
   has_reference: boolean;
+  is_human_verified?: boolean;
+  verification_status?: string;
   raw_text: string;
   normalized_text: string;
   start_time: number;

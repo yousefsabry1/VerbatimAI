@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useI18n } from '../context/I18nContext';
-import { HardwareInfo, ModelInfo, BenchmarkRunResult, WordAlignmentOp } from '../types';
+import { HardwareInfo, ModelInfo, BenchmarkRunResult, WordAlignmentOp, BenchmarkSample } from '../types';
 import { api } from '../services/api';
 import {
   Sparkles,
@@ -24,6 +24,9 @@ import {
   Columns,
   RefreshCw,
   Check,
+  ShieldAlert,
+  Sliders,
+  HelpCircle,
 } from 'lucide-react';
 
 interface BenchmarkProps {
@@ -33,10 +36,45 @@ interface BenchmarkProps {
 export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
   const { t, isRTL } = useI18n();
 
-  // State
+  // Benchmark Sample Catalog State
+  const [samples, setSamples] = useState<BenchmarkSample[]>([
+    {
+      sample_id: 'dev_0_103',
+      name: 'Development Sample (00:00 - 01:43)',
+      start_time: 0.0,
+      end_time: 103.5,
+      duration: 103.5,
+      audio_url: '/api/benchmark/audio/dev_0_103',
+      status: 'VERIFIED',
+      verification_badge: 'Verified Human Reference (203 words)',
+      has_human_reference: true,
+      word_count: 203,
+      description: 'Original human ground-truth transcript provided by the user. Baseline: 52.71% Normalized WER.',
+    },
+    {
+      sample_id: 'test_180_225',
+      name: 'Independent Test Sample (03:00 - 03:45)',
+      start_time: 180.0,
+      end_time: 225.0,
+      duration: 45.0,
+      audio_url: '/api/benchmark/audio/test_180_225',
+      status: 'UNVERIFIED',
+      verification_badge: 'UNVERIFIED — No valid WER/CER available',
+      has_human_reference: false,
+      word_count: 0,
+      description: 'Independent 45s out-of-sample audio interval. Requires manual human verification against audio.',
+    },
+  ]);
+  const [activeSampleId, setActiveSampleId] = useState<string>('test_180_225');
+
+  // Human Reference & Boundaries State
   const [refText, setRefText] = useState<string>('');
-  const [startTime, setStartTime] = useState<number>(0.0);
-  const [endTime, setEndTime] = useState<number>(103.0);
+  const [isHumanVerified, setIsHumanVerified] = useState<boolean>(false);
+  const [verificationBadge, setVerificationBadge] = useState<string>('UNVERIFIED — No valid WER/CER available');
+  const [certificationChecked, setCertificationChecked] = useState<boolean>(false);
+
+  const [startTime, setStartTime] = useState<number>(180.0);
+  const [endTime, setEndTime] = useState<number>(225.0);
   const [selectedModels, setSelectedModels] = useState<string[]>([
     'codeswitched-medium',
     'medium',
@@ -65,37 +103,66 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
   // Audio Playback State
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [isLooping, setIsLooping] = useState<boolean>(false);
+  const [isLooping, setIsLooping] = useState<boolean>(true);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
+  const [currentTime, setCurrentTime] = useState<number>(0.0);
+  const [audioDuration, setAudioDuration] = useState<number>(45.0);
 
-  // Quick Interval Presets
-  const intervalPresets = [
-    { label: 'Full Reference (00:00 - 01:43)', start: 0.0, end: 103.5 },
-    { label: '1. Greeting & Proposal (00:00 - 00:22)', start: 0.0, end: 22.5 },
-    { label: '2. Title & University Logo (00:22 - 00:53)', start: 22.5, end: 53.8 },
-    { label: '3. Program & Making AI (00:53 - 01:17)', start: 53.8, end: 77.0 },
-    { label: '4. Instructors & Details (01:17 - 01:43)', start: 77.0, end: 103.5 },
-  ];
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3500);
+  };
 
-  // Load initial reference and models
+  // Load samples and active reference on mount
   useEffect(() => {
-    api.getBenchmarkReference().then(res => {
-      if (res.has_reference) {
-        setRefText(res.raw_text);
-        if (res.start_time !== undefined) setStartTime(res.start_time);
-        if (res.end_time !== undefined) setEndTime(res.end_time);
+    api.getBenchmarkSamples().then(res => {
+      if (res.samples && res.samples.length > 0) {
+        setSamples(res.samples);
       }
-    });
+    }).catch(() => {});
 
     api.getModels().then(res => {
       setAvailableModels(res.models);
-    });
+    }).catch(() => {});
 
-    api.getBenchmarkResults().then(res => {
-      if (res.has_results && res.results.length > 0) {
-        setResults(res.results);
-      }
-    });
+    loadSampleData('test_180_225');
   }, []);
+
+  const loadSampleData = async (sampleId: string) => {
+    setActiveSampleId(sampleId);
+    try {
+      const refRes = await api.getBenchmarkReference(sampleId);
+      setRefText(refRes.raw_text || '');
+      setIsHumanVerified(Boolean(refRes.is_human_verified));
+      setVerificationBadge(refRes.verification_status || (refRes.is_human_verified ? 'Verified Human Reference' : 'UNVERIFIED — No valid WER/CER available'));
+      setCertificationChecked(Boolean(refRes.is_human_verified));
+
+      if (refRes.start_time !== undefined) setStartTime(refRes.start_time);
+      if (refRes.end_time !== undefined) setEndTime(refRes.end_time);
+
+      const resultsRes = await api.getBenchmarkResults(sampleId);
+      if (resultsRes.has_results && resultsRes.results.length > 0) {
+        setResults(resultsRes.results);
+        setSelectedResultIndex(0);
+        if (resultsRes.results.length > 1) setCompareIndexB(1);
+      } else {
+        setResults([]);
+      }
+
+      if (audioRef.current) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+        audioRef.current.src = api.getBenchmarkAudioUrl(sampleId);
+        audioRef.current.load();
+      }
+    } catch (e: any) {
+      console.error('Failed to load sample data:', e);
+    }
+  };
+
+  const handleSelectSample = (sampleId: string) => {
+    loadSampleData(sampleId);
+  };
 
   // Update edited hypothesis whenever selected result changes
   useEffect(() => {
@@ -104,15 +171,37 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
     }
   }, [selectedResultIndex, results]);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
-  };
-
   const handleSaveReference = async () => {
+    if (!refText.trim()) {
+      alert('Please enter reference text before saving.');
+      return;
+    }
+
+    if (activeSampleId === 'test_180_225' && !certificationChecked) {
+      alert('Integrity Safeguard: You must certify that this transcript was verified manually by a human against the audio before saving.');
+      return;
+    }
+
     try {
-      await api.saveBenchmarkReference(refText, startTime, endTime);
-      showToast('Human reference saved locally!');
+      const res = await api.saveBenchmarkReference({
+        sample_id: activeSampleId,
+        reference_text: refText.trim(),
+        start_time: startTime,
+        end_time: endTime,
+        is_human_verified: certificationChecked,
+        verification_statement: certificationChecked
+          ? 'Human user manually transcribed and verified against dd.ogg recording.'
+          : undefined,
+      });
+
+      setIsHumanVerified(res.is_human_verified);
+      setVerificationBadge(res.is_human_verified ? `Verified Human Reference (${refText.trim().split(/\s+/).length} words)` : 'UNVERIFIED — No valid WER/CER available');
+
+      // Refresh samples list
+      const samplesRes = await api.getBenchmarkSamples();
+      if (samplesRes.samples) setSamples(samplesRes.samples);
+
+      showToast(res.message || 'Reference saved successfully!');
     } catch (err: any) {
       alert('Failed to save reference: ' + err.message);
     }
@@ -129,15 +218,12 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
   };
 
   const handleRunBenchmark = async () => {
-    if (!refText.trim()) {
-      alert('Please enter or preserve a human reference transcript first.');
-      return;
-    }
     setIsRunning(true);
-    setStatusMessage(`Running benchmark on interval ${startTime}s - ${endTime}s...`);
+    setStatusMessage(`Running candidate models on ${activeSampleId === 'test_180_225' ? 'Independent Test Sample (03:00 - 03:45)' : 'Development Sample'}...`);
 
     try {
       const res = await api.runBenchmark({
+        sample_id: activeSampleId,
         start_time: startTime,
         end_time: endTime,
         model_ids: selectedModels,
@@ -153,47 +239,56 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
       if (res.results && res.results.length > 1) {
         setCompareIndexB(1);
       }
-      showToast('Benchmark run completed successfully!');
+
+      if (res.is_human_verified) {
+        showToast('Benchmark run completed with verified WER/CER metrics!');
+      } else {
+        showToast('Transcription generated. Metrics marked UNVERIFIED pending human reference.');
+      }
     } catch (err: any) {
-      alert('Benchmark failed: ' + err.message);
+      alert('Benchmark run failed: ' + err.message);
     } finally {
       setIsRunning(false);
       setStatusMessage(null);
     }
   };
 
-  const handlePlayAudioInterval = () => {
+  const handlePlayPause = () => {
     if (!audioRef.current) return;
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.currentTime = startTime;
       audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+    }
+  };
+
+  const handleSpeedChange = (speed: number) => {
+    setPlaybackSpeed(speed);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = speed;
     }
   };
 
   const handleTimeUpdate = () => {
     if (!audioRef.current) return;
-    if (audioRef.current.currentTime >= endTime) {
-      if (isLooping) {
-        audioRef.current.currentTime = startTime;
-        audioRef.current.play();
-      } else {
-        audioRef.current.pause();
-        setIsPlaying(false);
-      }
+    setCurrentTime(audioRef.current.currentTime);
+  };
+
+  const handleAudioEnded = () => {
+    if (isLooping && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play().catch(() => {});
+    } else {
+      setIsPlaying(false);
     }
   };
 
-  const handleSelectPreset = (preset: { start: number; end: number }) => {
-    setStartTime(preset.start);
-    setEndTime(preset.end);
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setCurrentTime(val);
     if (audioRef.current) {
-      audioRef.current.currentTime = preset.start;
-      if (isPlaying) {
-        audioRef.current.play().catch(() => {});
-      }
+      audioRef.current.currentTime = val;
     }
   };
 
@@ -204,7 +299,6 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
       const res = await api.liveAlign(refText, editedHypText, evalMode);
       if (res.status === 'success' && res.metrics) {
         const m = res.metrics;
-        // Update the active result in state with live recalculated metrics
         const updated = [...results];
         if (updated[selectedResultIndex]) {
           updated[selectedResultIndex] = {
@@ -234,22 +328,23 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
     const dateStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
     let md = `# VerbatimAI Accuracy Benchmark Report\n\n`;
     md += `**Date**: ${dateStr}\n`;
-    md += `**Evaluation Window**: ${startTime}s to ${endTime}s (${(endTime - startTime).toFixed(1)}s duration)\n`;
-    md += `**Evaluation Mode**: ${evalMode}\n`;
-    md += `**VAD Active**: ${vadFilter ? 'Yes' : 'No (Raw Acoustic Stream)'}\n\n`;
+    md += `**Sample**: ${activeSampleId === 'test_180_225' ? 'Independent Test Sample (03:00 - 03:45)' : 'Development Sample (00:00 - 01:43)'}\n`;
+    md += `**Verification Status**: ${isHumanVerified ? 'VERIFIED HUMAN GROUND TRUTH' : 'UNVERIFIED — No valid WER/CER available'}\n`;
+    md += `**Evaluation Mode**: ${evalMode}\n\n`;
     md += `## Candidate Performance Matrix\n\n`;
-    md += `| Model | Device | WER (%) | CER (%) | Sub (S) | Del (D) | Ins (I) | Time (s) | Speedup |\n`;
-    md += `| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n`;
+    md += `| Model | Device | Status | WER (%) | CER (%) | Sub (S) | Del (D) | Ins (I) | Time (s) | Speedup |\n`;
+    md += `| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n`;
     results.forEach(r => {
-      const wer = evalMode === 'normalized' ? r.norm_wer : r.raw_wer;
-      const cer = evalMode === 'normalized' ? r.norm_cer : r.raw_cer;
-      const sub = evalMode === 'normalized' ? r.norm_sub : r.raw_sub;
-      const del = evalMode === 'normalized' ? r.norm_del : r.raw_del;
-      const ins = evalMode === 'normalized' ? r.norm_ins : r.raw_ins;
-      md += `| **${r.name}** | ${r.device || 'N/A'} (${r.compute || ''}) | ${wer?.toFixed(2)}% | ${cer?.toFixed(2)}% | ${sub} | ${del} | ${ins} | ${r.elapsed_seconds || 0}s | ${r.speedup || 0}x |\n`;
+      const isVer = r.is_verified && r.norm_wer !== null;
+      const werStr = isVer ? `${(evalMode === 'normalized' ? r.norm_wer : r.raw_wer)?.toFixed(2)}%` : 'UNVERIFIED';
+      const cerStr = isVer ? `${(evalMode === 'normalized' ? r.norm_cer : r.raw_cer)?.toFixed(2)}%` : '—';
+      const sub = isVer ? (evalMode === 'normalized' ? r.norm_sub : r.raw_sub) : '—';
+      const del = isVer ? (evalMode === 'normalized' ? r.norm_del : r.raw_del) : '—';
+      const ins = isVer ? (evalMode === 'normalized' ? r.norm_ins : r.raw_ins) : '—';
+      md += `| **${r.name}** | ${r.device || 'N/A'} (${r.compute || ''}) | ${isVer ? 'Verified' : 'Unverified'} | ${werStr} | ${cerStr} | ${sub} | ${del} | ${ins} | ${r.elapsed_seconds || 0}s | ${r.speedup || 0}x |\n`;
     });
-    md += `\n## Human Ground Truth Reference\n\n\`\`\`text\n${refText}\n\`\`\`\n\n`;
-    md += `## Detailed Predictions\n\n`;
+    md += `\n## Human Reference\n\n\`\`\`text\n${refText || '[No human reference provided yet]'}\n\`\`\`\n\n`;
+    md += `## Model Predictions\n\n`;
     results.forEach(r => {
       md += `### ${r.name}\n\n\`\`\`text\n${r.predicted_text || 'No prediction'}\n\`\`\`\n\n`;
     });
@@ -258,7 +353,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `verbatim_ai_benchmark_${Math.round(startTime)}s_${Math.round(endTime)}s.md`;
+    a.download = `verbatim_ai_benchmark_${activeSampleId}_${Math.round(startTime)}s_${Math.round(endTime)}s.md`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -279,24 +374,27 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
         </div>
       )}
 
-      {/* Hidden audio element for interval playback */}
+      {/* Audio element for dedicated sample streaming */}
       <audio
         ref={audioRef}
-        src="/api/audio/file/dd.ogg"
+        src={api.getBenchmarkAudioUrl(activeSampleId)}
         onTimeUpdate={handleTimeUpdate}
-        onEnded={() => setIsPlaying(false)}
+        onLoadedMetadata={() => {
+          if (audioRef.current) setAudioDuration(audioRef.current.duration || 45.0);
+        }}
+        onEnded={handleAudioEnded}
       />
 
-      {/* Page Title */}
+      {/* Page Title & Integrity Badge */}
       <div className="space-y-1">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl sm:text-3xl font-black text-white light:text-surface-900 flex items-center gap-2.5">
               <BarChart3 className="h-7 w-7 text-brand-400" />
-              <span>ASR Accuracy Benchmark & Dialect Analysis</span>
+              <span>ASR Accuracy Benchmark & Integrity Review</span>
             </h1>
             <p className="text-xs sm:text-sm text-surface-400 light:text-surface-600">
-              Quantitative Word Error Rate (WER) and Character Error Rate (CER) evaluation against human ground truth.
+              Controlled speech recognition benchmarking with strict human-verification safeguards and zero synthetic ground truth.
             </p>
           </div>
 
@@ -323,107 +421,151 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
         </div>
       </div>
 
-      {/* Top Grid: Audio Interval & Configuration */}
+      {/* Audit Invalidation Notice Banner */}
+      <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-xs text-amber-200 flex items-start gap-3">
+        <ShieldAlert className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+        <div className="space-y-1">
+          <span className="font-bold block text-amber-300">
+            Benchmark Integrity Notice — Formal Retraction of Slice 245s–295s (30.22% WER)
+          </span>
+          <p className="text-[11px] text-amber-200/80 leading-relaxed">
+            The previously reported 30.22% WER on audio slice 245s–295s has been invalidated because the reference was bootstrapped using model assistance rather than human transcription. In Verbatim AI, no transcript is considered ground truth without explicit human certification.
+          </p>
+        </div>
+      </div>
+
+      {/* Benchmark Sample Switcher Tabs */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {samples.map(s => {
+          const isSelected = s.sample_id === activeSampleId;
+          const isVerified = s.status === 'VERIFIED';
+
+          return (
+            <div
+              key={s.sample_id}
+              onClick={() => handleSelectSample(s.sample_id)}
+              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+                isSelected
+                  ? 'border-brand-500/80 bg-brand-500/10 ring-1 ring-brand-500/40 shadow-lg'
+                  : 'border-surface-800 bg-surface-900/40 hover:bg-surface-850 hover:border-surface-700'
+              }`}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-bold text-white flex items-center gap-2">
+                  <FileText className={`h-4 w-4 ${isSelected ? 'text-brand-400' : 'text-surface-400'}`} />
+                  <span>{s.name}</span>
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide uppercase border ${
+                    isVerified
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  }`}
+                >
+                  {isVerified ? 'VERIFIED HUMAN' : 'UNVERIFIED'}
+                </span>
+              </div>
+              <p className="text-xs text-surface-400 leading-relaxed mb-3">{s.description}</p>
+              <div className="flex items-center justify-between text-[11px] font-mono text-surface-400 pt-2 border-t border-surface-800/60">
+                <span>Duration: {s.duration.toFixed(1)}s</span>
+                <span>Word Count: {s.word_count} words</span>
+                <span className="font-sans font-semibold text-brand-300">
+                  {isSelected ? '● Active Sample' : 'Click to Switch'}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Top Grid: Audio Player Controls & Human Reference Editor */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Audio Interval Selection Card */}
+        {/* Audio Player & Playback Speed Card */}
         <div className="rounded-2xl border border-surface-800 bg-surface-900/50 p-5 light:border-surface-200 light:bg-white space-y-4">
-          <h3 className="text-sm font-bold text-white light:text-surface-900 flex items-center gap-2">
-            <Volume2 className="h-4 w-4 text-brand-400" />
-            <span>Audio Interval Alignment</span>
+          <h3 className="text-sm font-bold text-white light:text-surface-900 flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              <Volume2 className="h-4 w-4 text-brand-400" />
+              <span>Audio Playback & Verification Player</span>
+            </span>
+            <span className="text-xs font-mono text-brand-300">
+              {Math.floor(currentTime / 60)}:{(Math.floor(currentTime) % 60).toString().padStart(2, '0')} /{' '}
+              {Math.floor(audioDuration / 60)}:{(Math.floor(audioDuration) % 60).toString().padStart(2, '0')}
+            </span>
           </h3>
 
-          {/* Quick Presets */}
+          {/* Scrubber */}
+          <div className="space-y-1">
+            <input
+              type="range"
+              min="0"
+              max={audioDuration || 45.0}
+              step="0.1"
+              value={currentTime}
+              onChange={handleSeek}
+              className="w-full accent-brand-500 cursor-pointer h-1.5 bg-surface-800 rounded-lg"
+            />
+          </div>
+
+          {/* Primary Audio Player Controls */}
+          <div className="p-3 rounded-xl bg-surface-950/80 border border-surface-800/80 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={handlePlayPause}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-brand-600 text-white font-bold text-xs hover:bg-brand-500 transition-colors shadow-md"
+            >
+              {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              <span>{isPlaying ? 'Pause Audio' : 'Play Audio'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsLooping(!isLooping)}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-semibold transition-colors ${
+                isLooping
+                  ? 'bg-brand-500/20 text-brand-300 border-brand-500/40'
+                  : 'bg-surface-900 text-surface-400 border-surface-800 hover:text-surface-200'
+              }`}
+              title="Toggle Audio Looping"
+            >
+              <Repeat className="h-3.5 w-3.5" />
+              <span>Loop: {isLooping ? 'ON' : 'OFF'}</span>
+            </button>
+          </div>
+
+          {/* Playback Speed Controls */}
           <div className="space-y-1.5">
-            <label className="text-[11px] font-semibold text-surface-400 block">Difficult Interval Presets:</label>
-            <div className="grid grid-cols-1 gap-1">
-              {intervalPresets.map((p, idx) => {
-                const isSelected = Math.abs(startTime - p.start) < 0.1 && Math.abs(endTime - p.end) < 0.1;
-                return (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => handleSelectPreset(p)}
-                    className={`text-left px-2.5 py-1.5 rounded-lg text-[11px] transition-colors border flex items-center justify-between ${
-                      isSelected
-                        ? 'bg-brand-500/15 border-brand-500/40 text-brand-300 font-semibold'
-                        : 'bg-surface-950/40 border-surface-800/60 text-surface-400 hover:bg-surface-800/40 hover:text-surface-200'
-                    }`}
-                  >
-                    <span>{p.label}</span>
-                    {isSelected && <Check className="h-3 w-3 text-brand-400" />}
-                  </button>
-                );
-              })}
+            <label className="text-[11px] font-semibold text-surface-400 block flex items-center gap-1.5">
+              <Sliders className="h-3.5 w-3.5 text-brand-400" />
+              <span>Playback Speed (for Human Transcription):</span>
+            </label>
+            <div className="grid grid-cols-5 gap-1.5">
+              {[0.5, 0.75, 1.0, 1.25, 1.5].map(spd => (
+                <button
+                  key={spd}
+                  type="button"
+                  onClick={() => handleSpeedChange(spd)}
+                  className={`py-1.5 rounded-lg text-xs font-mono font-semibold transition-colors border ${
+                    playbackSpeed === spd
+                      ? 'bg-brand-600 text-white border-brand-500'
+                      : 'bg-surface-950 text-surface-400 border-surface-800 hover:bg-surface-800 hover:text-surface-200'
+                  }`}
+                >
+                  {spd}x
+                </button>
+              ))}
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 text-xs pt-1">
-            <div>
-              <label className="text-surface-400 font-medium block mb-1">Start Time (sec)</label>
-              <input
-                type="number"
-                step="0.5"
-                min="0"
-                value={startTime}
-                onChange={e => setStartTime(parseFloat(e.target.value) || 0)}
-                className="w-full rounded-lg border border-surface-800 bg-surface-900 px-3 py-1.5 text-xs text-white font-mono"
-              />
-            </div>
-            <div>
-              <label className="text-surface-400 font-medium block mb-1">End Time (sec)</label>
-              <input
-                type="number"
-                step="0.5"
-                min="1"
-                value={endTime}
-                onChange={e => setEndTime(parseFloat(e.target.value) || 103.0)}
-                className="w-full rounded-lg border border-surface-800 bg-surface-900 px-3 py-1.5 text-xs text-white font-mono"
-              />
-            </div>
-          </div>
-
-          {/* Player controls */}
-          <div className="p-3 rounded-xl bg-surface-950/60 border border-surface-800/80 text-xs flex items-center justify-between">
-            <div className="space-y-0.5">
-              <span className="text-surface-400 block text-[11px]">Interval Duration:</span>
-              <span className="font-bold text-brand-300 font-mono">
-                {Math.floor(startTime / 60)}:{(Math.floor(startTime) % 60).toString().padStart(2, '0')} —{' '}
-                {Math.floor(endTime / 60)}:{(Math.floor(endTime) % 60).toString().padStart(2, '0')} ({(endTime - startTime).toFixed(1)}s)
-              </span>
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={handlePlayAudioInterval}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-500 transition-colors"
-              >
-                {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-                <span>{isPlaying ? 'Pause' : 'Play'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsLooping(!isLooping)}
-                className={`p-1.5 rounded-lg border transition-colors ${
-                  isLooping ? 'bg-brand-500/20 text-brand-400 border-brand-500/40' : 'bg-surface-800 text-surface-400 border-surface-700'
-                }`}
-                title="Loop Interval Playback"
-              >
-                <Repeat className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-
-          {/* Model Selection */}
-          <div className="space-y-2 pt-1">
-            <label className="text-xs font-semibold text-surface-300 block">Candidate Models to Compare:</label>
+          {/* Candidate Models to Compare */}
+          <div className="space-y-2 pt-2 border-t border-surface-800/60">
+            <label className="text-xs font-semibold text-surface-300 block">Candidate Models for Comparison:</label>
             <div className="space-y-1.5">
               {availableModels.map(m => (
                 <label
                   key={m.id}
                   className={`flex items-center justify-between p-2.5 rounded-xl border cursor-pointer transition-colors text-xs ${
                     selectedModels.includes(m.id)
-                      ? 'border-brand-500/50 bg-brand-500/5 text-white'
+                      ? 'border-brand-500/50 bg-brand-500/10 text-white'
                       : 'border-surface-800 bg-surface-900/40 text-surface-400 hover:border-surface-700'
                   }`}
                 >
@@ -446,37 +588,74 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
         </div>
 
         {/* Human Ground Truth Reference Panel */}
-        <div className="lg:col-span-2 rounded-2xl border border-surface-800 bg-surface-900/50 p-5 light:border-surface-200 light:bg-white space-y-3 flex flex-col justify-between">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
+        <div className="lg:col-span-2 rounded-2xl border border-surface-800 bg-surface-900/50 p-5 light:border-surface-200 light:bg-white space-y-4 flex flex-col justify-between">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-white light:text-surface-900 flex items-center gap-2">
                 <FileText className="h-4 w-4 text-emerald-400" />
                 <span>Human Ground-Truth Reference</span>
               </h3>
-              <span className="text-xs font-mono text-surface-400">
-                {refText.split(/\s+/).filter(Boolean).length} words
-              </span>
+
+              <div className="flex items-center gap-2">
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide uppercase border ${
+                    isHumanVerified
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      : 'bg-amber-500/20 text-amber-300 border-amber-500/30 animate-pulse'
+                  }`}
+                >
+                  {isHumanVerified ? 'VERIFIED' : 'UNVERIFIED — No valid WER/CER available'}
+                </span>
+                <span className="text-xs font-mono text-surface-400">
+                  {refText.split(/\s+/).filter(Boolean).length} words
+                </span>
+              </div>
             </div>
+
+            {/* Unverified Warning Banner if in test sample */}
+            {activeSampleId === 'test_180_225' && !isHumanVerified && (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 text-xs text-amber-200 space-y-1">
+                <span className="font-bold flex items-center gap-1.5 text-amber-300">
+                  <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+                  <span>Manual Human Verification Required</span>
+                </span>
+                <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                  This 45-second audio slice (03:00 - 03:45) is an independent test sample. Play the audio on the left, transcribe the spoken words into the editor below, and check the certification box to unlock verified WER/CER benchmarking.
+                </p>
+              </div>
+            )}
 
             <textarea
               rows={6}
               value={refText}
               onChange={e => setRefText(e.target.value)}
-              placeholder="Paste or edit the human ground-truth reference transcript..."
-              className="w-full rounded-xl border border-surface-800 bg-surface-950/80 p-3 text-xs text-white placeholder:text-surface-600 focus:outline-none focus:border-brand-500 resize-none font-sans leading-relaxed"
+              placeholder={
+                activeSampleId === 'test_180_225'
+                  ? 'Listen to the 45-second audio and type the human ground-truth transcript here...'
+                  : 'Paste or edit the human ground-truth reference transcript...'
+              }
+              className="w-full rounded-xl border border-surface-800 bg-surface-950/80 p-3.5 text-xs text-white placeholder:text-surface-600 focus:outline-none focus:border-brand-500 resize-none font-sans leading-relaxed"
               dir="rtl"
             />
 
-            <p className="text-[11px] text-surface-500 flex items-center gap-1.5">
-              <Info className="h-3.5 w-3.5 text-brand-400 shrink-0" />
-              <span>
-                Preserved as human ground-truth reference. Excluded from Git and never injected into model prompts.
-              </span>
-            </p>
+            {/* Human Verification Certification Checkbox */}
+            {activeSampleId === 'test_180_225' && (
+              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-surface-950/60 border border-surface-800/80 text-xs text-surface-200 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={certificationChecked}
+                  onChange={e => setCertificationChecked(e.target.checked)}
+                  className="mt-0.5 rounded border-surface-700 bg-surface-800 text-brand-500 focus:ring-brand-500"
+                />
+                <span className="text-[11px] leading-relaxed">
+                  <strong className="text-white">Human Certification:</strong> I certify that this transcript was verified manually by a human against the audio recording and was not copied or generated from an unverified ASR model prediction.
+                </span>
+              </label>
+            )}
           </div>
 
-          {/* Evaluation Controls & Run Button */}
-          <div className="pt-2 border-t border-surface-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+          {/* Controls & Run Button */}
+          <div className="pt-3 border-t border-surface-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
             <div className="flex flex-wrap items-center gap-3">
               <div>
                 <label className="text-surface-400 mr-2">Evaluation Mode:</label>
@@ -485,8 +664,8 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                   onChange={e => setEvalMode(e.target.value as any)}
                   className="rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1 text-xs text-white"
                 >
-                  <option value="normalized">Normalized (Arabic/English Standardized)</option>
-                  <option value="raw">Raw (Exact Characters & Casing)</option>
+                  <option value="normalized">Normalized (Standard Arabic/English)</option>
+                  <option value="raw">Raw (Exact Punctuation & Casing)</option>
                 </select>
               </div>
 
@@ -497,21 +676,8 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                   onChange={e => setVadFilter(e.target.value === 'true')}
                   className="rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1 text-xs text-white"
                 >
-                  <option value="false">Disabled (Recommended for Egyptian Onsets)</option>
+                  <option value="false">Disabled (Optimal Egyptian Preset)</option>
                   <option value="true">Enabled (Silero VAD)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="text-surface-400 mr-2">Device Mode:</label>
-                <select
-                  value={deviceMode}
-                  onChange={e => setDeviceMode(e.target.value)}
-                  className="rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1 text-xs text-white"
-                >
-                  <option value="auto">Auto GPU/CPU</option>
-                  <option value="cuda_only">GPU Only (Strict CUDA)</option>
-                  <option value="cpu">CPU Mode</option>
                 </select>
               </div>
             </div>
@@ -520,7 +686,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
               <button
                 type="button"
                 onClick={handleSaveReference}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-surface-700 bg-surface-800 text-xs font-semibold text-white hover:bg-surface-700 transition-colors"
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-surface-700 bg-surface-800 text-xs font-semibold text-white hover:bg-surface-700 transition-colors"
               >
                 <Save className="h-3.5 w-3.5" />
                 <span>Save Reference</span>
@@ -533,7 +699,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-brand-600 text-xs font-bold text-white shadow-lg shadow-brand-500/25 hover:bg-brand-500 disabled:opacity-50 transition-all active:scale-[0.98]"
               >
                 <Sparkles className={`h-4 w-4 ${isRunning ? 'animate-spin' : ''}`} />
-                <span>{isRunning ? 'Benchmarking...' : 'Run Benchmark'}</span>
+                <span>{isRunning ? 'Evaluating...' : 'Run Benchmark'}</span>
               </button>
             </div>
           </div>
@@ -547,10 +713,9 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
         </div>
       )}
 
-      {/* Benchmark Results Section */}
+      {/* Candidate Performance Matrix Table */}
       {results.length > 0 && (
         <div className="space-y-6 animate-fadeIn">
-          {/* Candidate Comparison Table */}
           <div className="rounded-2xl border border-surface-800 bg-surface-900/50 p-6 light:border-surface-200 light:bg-white space-y-4">
             <h3 className="text-base font-bold text-white light:text-surface-900 flex items-center justify-between">
               <span className="flex items-center gap-2">
@@ -558,7 +723,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                 <span>Candidate Performance Matrix ({evalMode === 'normalized' ? 'Normalized Metrics' : 'Raw Metrics'})</span>
               </span>
               <span className="text-xs font-normal text-surface-400">
-                Ground Truth: {Math.round(startTime)}s - {Math.round(endTime)}s ({Math.round(endTime - startTime)}s)
+                Sample: {activeSampleId === 'test_180_225' ? 'Independent Test (03:00 - 03:45)' : 'Development Sample (00:00 - 01:43)'}
               </span>
             </h3>
 
@@ -575,13 +740,15 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                     <th className="p-3 text-center">Ins (I)</th>
                     <th className="p-3 text-center">Inference Time</th>
                     <th className="p-3 text-center">Speedup</th>
-                    <th className="p-3 text-right rtl:text-left">Select</th>
+                    <th className="p-3 text-right rtl:text-left">Inspect</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-surface-800/60 font-mono">
                   {results.map((r, idx) => {
                     const isSuccess = r.status === 'success';
                     const isCurrent = idx === selectedResultIndex;
+                    const isVerified = r.is_verified && r.norm_wer !== null;
+
                     const wer = evalMode === 'normalized' ? r.norm_wer : r.raw_wer;
                     const cer = evalMode === 'normalized' ? r.norm_cer : r.raw_cer;
                     const sub = evalMode === 'normalized' ? r.norm_sub : r.raw_sub;
@@ -618,15 +785,21 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                         </td>
                         <td className="p-3 text-center font-bold text-sm">
                           {isSuccess ? (
-                            <span className={wer! < 60 ? 'text-emerald-400' : 'text-amber-400'}>
-                              {wer?.toFixed(2)}%
-                            </span>
+                            isVerified ? (
+                              <span className={wer! < 60 ? 'text-emerald-400' : 'text-amber-400'}>
+                                {wer?.toFixed(2)}%
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                UNVERIFIED — No valid WER/CER available
+                              </span>
+                            )
                           ) : (
                             '—'
                           )}
                         </td>
                         <td className="p-3 text-center font-bold text-sm">
-                          {isSuccess ? (
+                          {isSuccess && isVerified ? (
                             <span className={cer! < 35 ? 'text-emerald-400' : 'text-amber-400'}>
                               {cer?.toFixed(2)}%
                             </span>
@@ -634,9 +807,9 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                             '—'
                           )}
                         </td>
-                        <td className="p-3 text-center text-amber-400">{isSuccess ? sub : '—'}</td>
-                        <td className="p-3 text-center text-rose-400">{isSuccess ? del : '—'}</td>
-                        <td className="p-3 text-center text-purple-400">{isSuccess ? ins : '—'}</td>
+                        <td className="p-3 text-center text-amber-400">{isSuccess && isVerified ? sub : '—'}</td>
+                        <td className="p-3 text-center text-rose-400">{isSuccess && isVerified ? del : '—'}</td>
+                        <td className="p-3 text-center text-purple-400">{isSuccess && isVerified ? ins : '—'}</td>
                         <td className="p-3 text-center text-surface-300">
                           {isSuccess ? `${r.elapsed_seconds}s` : '—'}
                         </td>
@@ -665,187 +838,78 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
             </div>
           </div>
 
-          {/* Word-Level Diff & Visual Alignment Inspector */}
+          {/* Model Transcript Inspection Panel */}
           {activeResult && activeResult.status === 'success' && (
-            <div className="rounded-2xl border border-surface-800 bg-surface-900/50 p-6 light:border-surface-200 light:bg-white space-y-5">
+            <div className="rounded-2xl border border-surface-800 bg-surface-900/50 p-6 light:border-surface-200 light:bg-white space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <h3 className="text-base font-bold text-white light:text-surface-900 flex items-center gap-2">
                     <Layers className="h-5 w-5 text-brand-400" />
-                    <span>Word-Level Alignment & Error Inspection: {activeResult.name}</span>
+                    <span>Candidate Transcript: {activeResult.name}</span>
                   </h3>
                   <p className="text-xs text-surface-400">
-                    Inspecting prediction against human ground truth with colour-coded edit operations.
+                    {activeResult.is_verified
+                      ? 'Inspecting prediction against verified human ground truth with edit operations.'
+                      : 'Unverified sample prediction. Review spoken audio against this candidate to prepare human reference.'}
                   </p>
                 </div>
 
-                {/* Diff Legend & Side-by-side toggle */}
-                <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold">
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                    Match (Correct)
-                  </span>
-                  <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
-                    Substitution
-                  </span>
-                  <span className="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/30">
-                    Deletion (Missing)
-                  </span>
-                  <span className="px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/30">
-                    Insertion (Extra)
-                  </span>
-
-                  {results.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => setIsComparingSideBySide(!isComparingSideBySide)}
-                      className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border transition-colors ${
-                        isComparingSideBySide ? 'bg-brand-600 text-white border-brand-500' : 'bg-surface-800 text-surface-300 border-surface-700'
-                      }`}
-                    >
-                      <Columns className="h-3 w-3" />
-                      <span>{isComparingSideBySide ? 'Hide Dual View' : 'Compare 2 Models'}</span>
-                    </button>
-                  )}
-                </div>
+                {activeResult.is_verified && results.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setIsComparingSideBySide(!isComparingSideBySide)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-surface-700 bg-surface-800 text-xs font-semibold text-white hover:bg-surface-700"
+                  >
+                    <Columns className="h-3.5 w-3.5" />
+                    <span>{isComparingSideBySide ? 'Single View' : 'Side-by-Side'}</span>
+                  </button>
+                )}
               </div>
 
-              {/* Visual Diff Badges */}
-              <div className="p-4 rounded-xl bg-surface-950/80 border border-surface-800 text-xs leading-loose flex flex-wrap gap-1.5" dir="rtl">
-                {activeResult.word_alignment?.map((op, opIdx) => {
-                  if (op.type === 'equal') {
-                    return (
-                      <span
-                        key={opIdx}
-                        className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20"
-                        title="Exact Word Match"
-                      >
-                        {op.ref}
-                      </span>
-                    );
-                  }
-                  if (op.type === 'substitute') {
-                    return (
-                      <span
-                        key={opIdx}
-                        className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
-                        title={`Substitution: Ref='${op.ref}' | Hyp='${op.hyp}'`}
-                      >
-                        <span className="line-through opacity-70 text-[10px] ml-1">{op.ref}</span>
-                        <strong className="underline">{op.hyp}</strong>
-                      </span>
-                    );
-                  }
-                  if (op.type === 'delete') {
-                    return (
-                      <span
-                        key={opIdx}
-                        className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 line-through"
-                        title={`Missing from AI Prediction: '${op.ref}'`}
-                      >
-                        {op.ref}
-                      </span>
-                    );
-                  }
-                  if (op.type === 'insert') {
-                    return (
-                      <span
-                        key={opIdx}
-                        className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30"
-                        title={`Extra / Hallucinated: '${op.hyp}'`}
-                      >
-                        +{op.hyp}
-                      </span>
-                    );
-                  }
-                  return null;
-                })}
+              {/* Prediction Text Display */}
+              <div className="p-4 rounded-xl bg-surface-950/80 border border-surface-800 text-sm text-white font-sans leading-relaxed" dir="rtl">
+                {activeResult.predicted_text || 'No prediction generated.'}
               </div>
 
-              {/* Side-by-Side Dual Model Comparison (Optional) */}
-              {isComparingSideBySide && compareResult && (
-                <div className="p-4 rounded-xl bg-surface-950/60 border border-brand-500/30 space-y-3">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-brand-300 flex items-center gap-1.5">
-                      <Columns className="h-4 w-4" />
-                      <span>Side-by-Side Comparison: Model A vs Model B</span>
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-surface-400">Compare with:</span>
-                      <select
-                        value={compareIndexB}
-                        onChange={e => setCompareIndexB(parseInt(e.target.value))}
-                        className="rounded border border-surface-700 bg-surface-900 px-2 py-0.5 text-xs text-white"
-                      >
-                        {results.map((r, i) => (
-                          <option key={i} value={i} disabled={i === selectedResultIndex}>
-                            {r.name} ({evalMode === 'normalized' ? r.norm_wer : r.raw_wer}%)
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                    <div className="p-3 rounded-lg bg-surface-900 border border-surface-800 space-y-1">
-                      <div className="flex items-center justify-between font-bold text-surface-200">
-                        <span>{activeResult.name}</span>
-                        <span className="text-emerald-400 font-mono">WER: {evalMode === 'normalized' ? activeResult.norm_wer : activeResult.raw_wer}%</span>
-                      </div>
-                      <div className="text-surface-300 text-[11px] leading-relaxed max-h-40 overflow-y-auto" dir="rtl">
-                        {activeResult.predicted_text}
-                      </div>
-                    </div>
-
-                    <div className="p-3 rounded-lg bg-surface-900 border border-surface-800 space-y-1">
-                      <div className="flex items-center justify-between font-bold text-surface-200">
-                        <span>{compareResult.name}</span>
-                        <span className="text-amber-400 font-mono">WER: {evalMode === 'normalized' ? compareResult.norm_wer : compareResult.raw_wer}%</span>
-                      </div>
-                      <div className="text-surface-300 text-[11px] leading-relaxed max-h-40 overflow-y-auto" dir="rtl">
-                        {compareResult.predicted_text}
-                      </div>
-                    </div>
+              {/* Word-Level Diff (only if verified) */}
+              {activeResult.is_verified && activeResult.word_alignment && activeResult.word_alignment.length > 0 && (
+                <div className="space-y-3 pt-3 border-t border-surface-800/60">
+                  <span className="text-xs font-bold text-surface-300 block">Visual Word-Level Alignment:</span>
+                  <div className="p-4 rounded-xl bg-surface-950/60 border border-surface-800 flex flex-wrap gap-1.5 text-xs leading-loose" dir="rtl">
+                    {activeResult.word_alignment.map((op, i) => {
+                      if (op.type === 'equal') {
+                        return (
+                          <span key={i} className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                            {op.hyp}
+                          </span>
+                        );
+                      }
+                      if (op.type === 'substitute') {
+                        return (
+                          <span key={i} className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 line-through decoration-rose-400">
+                            {op.hyp} <span className="text-[10px] text-surface-400 font-mono no-underline">({op.ref})</span>
+                          </span>
+                        );
+                      }
+                      if (op.type === 'delete') {
+                        return (
+                          <span key={i} className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                            [{op.ref}]
+                          </span>
+                        );
+                      }
+                      if (op.type === 'insert') {
+                        return (
+                          <span key={i} className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                            +{op.hyp}
+                          </span>
+                        );
+                      }
+                      return null;
+                    })}
                   </div>
                 </div>
               )}
-
-              {/* Human Transcription Corrections & Live Alignment */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                <div className="space-y-1.5">
-                  <h4 className="font-bold text-surface-300 flex items-center justify-between">
-                    <span>Human Ground-Truth Reference:</span>
-                    <span className="text-[10px] text-surface-500 font-mono">103.0s</span>
-                  </h4>
-                  <div className="p-3 rounded-xl bg-surface-950/60 border border-surface-800 text-surface-200 leading-relaxed max-h-48 overflow-y-auto" dir="rtl">
-                    {refText}
-                  </div>
-                </div>
-
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <h4 className="font-bold text-surface-300 flex items-center gap-1.5">
-                      <span>Model Prediction & Human Corrections:</span>
-                    </h4>
-                    <button
-                      type="button"
-                      disabled={isLiveAligning}
-                      onClick={handleRecalculateAlignment}
-                      className="flex items-center gap-1 px-2 py-0.5 rounded bg-brand-600 text-white font-semibold text-[10px] hover:bg-brand-500 disabled:opacity-50 transition-colors"
-                      title="Recalculate WER and Alignment live without re-running models"
-                    >
-                      <RefreshCw className={`h-3 w-3 ${isLiveAligning ? 'animate-spin' : ''}`} />
-                      <span>Recalculate Alignment</span>
-                    </button>
-                  </div>
-                  <textarea
-                    rows={6}
-                    value={editedHypText}
-                    onChange={e => setEditedHypText(e.target.value)}
-                    className="w-full p-3 rounded-xl bg-surface-950/60 border border-surface-800 text-surface-200 leading-relaxed focus:outline-none focus:border-brand-500 font-sans resize-none"
-                    dir="rtl"
-                  />
-                </div>
-              </div>
             </div>
           )}
         </div>

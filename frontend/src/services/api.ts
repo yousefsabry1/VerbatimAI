@@ -189,29 +189,47 @@ export const api = {
   },
 
   // Benchmarking
-  async getBenchmarkReference(): Promise<any> {
-    const res = await fetch(`${API_BASE}/benchmark/reference`);
+  async getBenchmarkSamples(): Promise<any> {
+    const res = await fetch(`${API_BASE}/benchmark/samples`);
+    if (!res.ok) throw new Error('Failed to fetch benchmark samples');
+    return res.json();
+  },
+
+  getBenchmarkAudioUrl(sampleId: string): string {
+    return `${API_BASE}/benchmark/audio/${sampleId}`;
+  },
+
+  async getBenchmarkReference(sampleId: string = 'dev_0_103'): Promise<any> {
+    const res = await fetch(`${API_BASE}/benchmark/reference?sample_id=${encodeURIComponent(sampleId)}`);
     if (!res.ok) throw new Error('Failed to fetch benchmark reference');
     return res.json();
   },
 
-  async saveBenchmarkReference(reference_text: string, start_time: number, end_time: number): Promise<any> {
+  async saveBenchmarkReference(params: {
+    sample_id?: string;
+    reference_text: string;
+    start_time: number;
+    end_time: number;
+    is_human_verified?: boolean;
+    verification_statement?: string;
+  }): Promise<any> {
     const res = await fetch(`${API_BASE}/benchmark/reference`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reference_text, start_time, end_time }),
+      body: JSON.stringify(params),
     });
     if (!res.ok) throw new Error('Failed to save benchmark reference');
     return res.json();
   },
 
-  async getBenchmarkResults(): Promise<{ has_results: boolean; results: any[] }> {
-    const res = await fetch(`${API_BASE}/benchmark/results`);
+  async getBenchmarkResults(sampleId: string = 'dev_0_103'): Promise<{ has_results: boolean; sample_id?: string; results: any[] }> {
+    const res = await fetch(`${API_BASE}/benchmark/results?sample_id=${encodeURIComponent(sampleId)}`);
     if (!res.ok) throw new Error('Failed to fetch benchmark results');
     return res.json();
   },
 
   async runBenchmark(params: {
+    sample_id?: string;
     start_time: number;
     end_time: number;
     model_ids: string[];
