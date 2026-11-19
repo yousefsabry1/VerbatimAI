@@ -7,6 +7,7 @@ import { Transcription } from './pages/Transcription';
 import { AudioConverter } from './pages/AudioConverter';
 import { History } from './pages/History';
 import { Settings } from './pages/Settings';
+import { Benchmark } from './pages/Benchmark';
 import type { HardwareInfo } from './types';
 import { api } from './services/api';
 import { ShieldCheck } from 'lucide-react';
@@ -49,6 +50,8 @@ const AppContent: React.FC = () => {
             hardware={hardware}
           />
         )}
+
+        {activeTab === 'benchmark' && <Benchmark hardware={hardware} />}
 
         {activeTab === 'converter' && <AudioConverter />}
 

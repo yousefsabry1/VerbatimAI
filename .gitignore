@@ -42,6 +42,10 @@ backend/storage/outputs/*
 !backend/storage/outputs/.gitkeep
 backend/storage/models/*
 !backend/storage/models/.gitkeep
+backend/storage/benchmarks/*
+!backend/storage/benchmarks/.gitkeep
+benchmarks/*
+!benchmarks/.gitkeep
 backend/storage/*.db
 backend/storage/*.db-journal
 backend/storage/*.db-wal

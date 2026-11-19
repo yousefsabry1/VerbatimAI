@@ -28,6 +28,9 @@ if exist "backend\.venv\Lib\site-packages\nvidia\cublas\bin" (
 if exist "backend\.venv\Lib\site-packages\nvidia\cudnn\bin" (
     set "PATH=%CD%\backend\.venv\Lib\site-packages\nvidia\cudnn\bin;!PATH!"
 )
+if exist "backend\.venv\Lib\site-packages\nvidia\cuda_nvrtc\bin" (
+    set "PATH=%CD%\backend\.venv\Lib\site-packages\nvidia\cuda_nvrtc\bin;!PATH!"
+)
 
 :: Automatically launch default browser to local URL after 2 seconds
 start "" /b powershell -NoProfile -Command "Start-Sleep -Seconds 2; Start-Process 'http://127.0.0.1:8000'"

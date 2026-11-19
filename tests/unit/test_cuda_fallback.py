@@ -90,3 +90,27 @@ def test_simulated_cuda_generator_fallback(tmp_path):
             f"Segment {curr_seg['id']} start {curr_seg['start']} overlapped prev end {prev_seg['end']}"
         )
         assert curr_seg["end"] > curr_seg["start"]
+
+
+def test_cuda_only_diagnostic_mode_halts_without_fallback():
+    """
+    Verifies that when device_mode='cuda_only', any CUDA failure halts immediately
+    and raises an error without silently switching to CPU.
+    """
+    slice_path = Path(r"C:\Users\youse\.gemini\antigravity\brain\3e1f44d8-52f9-4a36-9ba0-e8ea39fa92d5\scratch\slices\slice1_00_45.wav")
+    if not slice_path.exists():
+        pytest.skip("Test audio slice1_00_45.wav not found in scratch directory")
+
+    os.environ["VERBATIM_SIMULATE_CUDA_ERROR"] = "1"
+    job_id = f"test_cuda_only_{os.getpid()}"
+
+    with pytest.raises(RuntimeError) as exc_info:
+        run_transcription_pipeline(
+            input_path=slice_path,
+            job_id=job_id,
+            model_id="codeswitched-medium",
+            device_mode="cuda_only",
+            compute_mode="auto",
+        )
+
+    assert "GPU-Only Diagnostic Mode" in str(exc_info.value)

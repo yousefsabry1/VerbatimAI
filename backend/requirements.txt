@@ -8,3 +8,7 @@ python-multipart>=0.0.9
 aiofiles>=23.2.1
 pytest>=8.0.0
 httpx>=0.27.0
+jiwer>=4.0.0
+nvidia-cublas-cu12>=12.1.0; platform_system == "Windows" or platform_system == "Linux"
+nvidia-cudnn-cu12>=9.0.0; platform_system == "Windows" or platform_system == "Linux"
+nvidia-cuda-nvrtc-cu12>=12.1.0; platform_system == "Windows" or platform_system == "Linux"

@@ -456,9 +456,9 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                     onChange={e => setDeviceMode(e.target.value)}
                     className="w-full rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1.5 text-xs text-white"
                   >
-                    <option value="auto">{t.deviceAuto}</option>
-                    <option value="cuda">{t.deviceCuda}</option>
-                    <option value="cpu">{t.deviceCpu}</option>
+                    <option value="auto">Auto GPU/CPU Mode (Recommended)</option>
+                    <option value="cuda_only">GPU Only — Diagnostic Mode (Strict CUDA)</option>
+                    <option value="cpu">CPU Mode (Local Multithreaded)</option>
                   </select>
                 </div>
 

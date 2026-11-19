@@ -4,6 +4,7 @@ import gc
 import shutil
 import logging
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
@@ -12,6 +13,7 @@ register_nvidia_dll_directories()
 
 from faster_whisper import WhisperModel
 from huggingface_hub import snapshot_download
+from app.transcription.repetition_detector import detect_repetition_in_segment
 
 from app.core.config import (
     MODELS_DIR,
@@ -206,7 +208,7 @@ def load_whisper_model(
 
     if device_mode == "cpu":
         device_attempts = ["cpu"]
-    elif device_mode == "cuda":
+    elif device_mode in ("cuda", "cuda_only"):
         device_attempts = ["cuda"]
     else:  # auto
         device_attempts = ["cuda", "cpu"]
@@ -237,13 +239,169 @@ def load_whisper_model(
         except Exception as e:
             last_error = e
             logger.warning("Failed to initialize model on %s: %s", device, e)
-            if device_mode == "cuda":
+            if device_mode in ("cuda", "cuda_only"):
                 break
+
+    if device_mode == "cuda_only":
+        raise RuntimeError(
+            f"GPU-Only Diagnostic Mode Failure: CUDA is required but model '{model_id}' failed to load: {last_error}"
+        )
 
     raise RuntimeError(
         f"Unable to load speech recognition model '{model_id}'. "
         f"Last error: {last_error}. Try selecting CPU only with int8 compute."
     )
+
+
+def log_device_transition(
+    job_id: str,
+    prev_device: str,
+    new_device: str,
+    stage: str,
+    model_id: str,
+    compute_type: str,
+    reason: str,
+    exception: Optional[Exception] = None,
+) -> Dict[str, Any]:
+    tb_str = None
+    if exception:
+        import traceback
+        tb_str = traceback.format_exc()
+
+    vram_info = None
+    try:
+        if shutil.which("nvidia-smi"):
+            cmd = ["nvidia-smi", "--query-gpu=memory.used,memory.free", "--format=csv,noheader,nounits"]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, timeout=2)
+            if res.returncode == 0 and res.stdout.strip():
+                parts = [p.strip() for p in res.stdout.strip().split(",")]
+                if len(parts) >= 2:
+                    vram_info = f"Used: {parts[0]} MB, Free: {parts[1]} MB"
+    except Exception:
+        pass
+
+    transition_record = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "job_id": job_id,
+        "previous_device": prev_device,
+        "new_device": new_device,
+        "stage": stage,
+        "model_id": model_id,
+        "compute_type": compute_type,
+        "reason": reason,
+        "vram_status": vram_info,
+        "exception": str(exception) if exception else None,
+        "traceback": tb_str,
+        "cpu_fallback_activated": (new_device.startswith("cpu") and prev_device == "cuda"),
+    }
+    logger.warning("DEVICE TRANSITION [%s -> %s] at stage '%s': %s (VRAM: %s)",
+                   prev_device, new_device, stage, reason, vram_info)
+    return transition_record
+
+
+def retry_segment_without_loops(
+    model: WhisperModel,
+    audio_path: Path,
+    start: float,
+    end: float,
+    target_lang: Optional[str] = None,
+    beam_size: int = 5,
+    vad_parameters: Optional[Dict[str, Any]] = None,
+    job_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """
+    Retries transcribing a problematic segment where a pathological repetition loop was detected.
+    Applies aggressive anti-repetition decoding without prompt bias.
+    """
+    if end <= start:
+        return None
+
+    pad_start = max(0.0, start - 0.2)
+    pad_duration = max(0.5, (end - start) + 0.4)
+    work_dir = job_dir or OUTPUTS_DIR
+    slice_file = work_dir / f"loop_retry_{int(start * 1000)}_{int(end * 1000)}.wav"
+
+    ffmpeg = find_ffmpeg()
+    cmd = [
+        ffmpeg, "-y",
+        "-ss", str(pad_start),
+        "-t", str(pad_duration),
+        "-i", str(audio_path),
+        "-vn", "-ac", "1", "-ar", "16000",
+        str(slice_file),
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        gen, _ = model.transcribe(
+            str(slice_file),
+            language=target_lang,
+            initial_prompt=None,
+            beam_size=beam_size,
+            temperature=[0.2, 0.4],
+            repetition_penalty=1.20,
+            no_repeat_ngram_size=3,
+            compression_ratio_threshold=2.2,
+            condition_on_previous_text=False,
+            vad_filter=False,
+        )
+        resolved_parts = [s.text.strip() for s in gen if s.text.strip()]
+        return " ".join(resolved_parts)
+    except Exception as e:
+        logger.warning("Repetition retry failed on [%.2f -> %.2f]: %s", start, end, e)
+        return None
+    finally:
+        slice_file.unlink(missing_ok=True)
+
+
+def verify_segment_accuracy(
+    model: WhisperModel,
+    audio_path: Path,
+    start: float,
+    end: float,
+    target_lang: Optional[str] = None,
+    job_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """
+    Maximum Accuracy verification: re-evaluates low-confidence segments
+    using the active model on the active device without consuming extra VRAM or switching devices.
+    """
+    if end <= start:
+        return None
+
+    pad_start = max(0.0, start - 0.1)
+    pad_duration = max(0.4, (end - start) + 0.2)
+    work_dir = job_dir or OUTPUTS_DIR
+    slice_file = work_dir / f"verify_{int(start * 1000)}_{int(end * 1000)}.wav"
+
+    ffmpeg = find_ffmpeg()
+    cmd = [
+        ffmpeg, "-y",
+        "-ss", str(pad_start),
+        "-t", str(pad_duration),
+        "-i", str(audio_path),
+        "-vn", "-ac", "1", "-ar", "16000",
+        str(slice_file),
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        gen, _ = model.transcribe(
+            str(slice_file),
+            language=target_lang,
+            initial_prompt=None,
+            beam_size=5,
+            temperature=[0.0, 0.2],
+            repetition_penalty=1.10,
+            no_repeat_ngram_size=3,
+            condition_on_previous_text=False,
+            vad_filter=False,
+        )
+        parts = [s.text.strip() for s in gen if s.text.strip()]
+        return " ".join(parts)
+    except Exception as e:
+        logger.warning("Segment verification failed on [%.2f -> %.2f]: %s", start, end, e)
+        return None
+    finally:
+        slice_file.unlink(missing_ok=True)
 
 
 def prepare_inference_audio(
@@ -330,11 +488,9 @@ def run_transcription_pipeline(
     )
 
     # Setup Vocabulary Hints & Prompt
-    # Clean domain recognition hints only — no hallucinating explanatory sentences
+    # Clean domain recognition hints only — NEVER forced unless explicitly provided
     if vocabulary_hints and vocabulary_hints.strip():
         prompt = vocabulary_hints.strip()
-    elif model_id == "codeswitched-medium" or language in ("ar", "auto", None):
-        prompt = DEFAULT_VOCAB_HINTS
     else:
         prompt = None
 
@@ -347,7 +503,7 @@ def run_transcription_pipeline(
     else:
         target_lang = language
 
-    # Inference settings
+    # Inference settings with loop suppression & temperature fallback
     beam_size = 5 if accuracy_mode == "maximum" else 4
     vad_parameters = dict(min_silence_duration_ms=500, speech_pad_ms=300) if vad_filter else None
 
@@ -361,20 +517,25 @@ def run_transcription_pipeline(
     checkpoint_time = 0.0
     segments_list = []
     total_audio_duration = source_meta["duration"]
+    device_transitions: List[Dict[str, Any]] = []
+    repetition_loops_detected = 0
+    repetition_loops_resolved = 0
 
-    # Run inference with robust lazy generator error handling and checkpoint resumption
+    # Run inference with robust lazy generator error handling, repetition resolution, and checkpoint resumption
     try:
         segments_gen, info = model.transcribe(
             str(inference_audio),
             language=target_lang,
             initial_prompt=prompt,
             beam_size=beam_size,
-            temperature=0.0,
+            temperature=[0.0, 0.2, 0.4],
+            repetition_penalty=1.12,
+            no_repeat_ngram_size=3,
+            compression_ratio_threshold=2.2,
             word_timestamps=True,
             vad_filter=vad_filter,
             vad_parameters=vad_parameters,
             no_speech_threshold=0.6,
-            compression_ratio_threshold=2.4,
             condition_on_previous_text=False,  # Prevents repetition loops in conversational audio
         )
 
@@ -392,6 +553,33 @@ def run_transcription_pipeline(
             if not text:
                 continue
 
+            # Pathological repetition loop detection & adaptive resolution
+            rep_info = detect_repetition_in_segment(text)
+            orig_loop_text = None
+            is_rep_resolved = False
+            if rep_info:
+                repetition_loops_detected += 1
+                logger.warning(
+                    "Pathological repetition loop detected in segment [%.2f -> %.2f] ('%s' x%d): %s",
+                    seg.start, seg.end, rep_info["pattern"], rep_info["repeats"], text[:60]
+                )
+                orig_loop_text = text
+                retry_text = retry_segment_without_loops(
+                    model=model,
+                    audio_path=inference_audio,
+                    start=seg.start,
+                    end=seg.end,
+                    target_lang=target_lang,
+                    beam_size=beam_size,
+                    vad_parameters=vad_parameters,
+                    job_dir=job_dir,
+                )
+                if retry_text and not detect_repetition_in_segment(retry_text):
+                    logger.info("Successfully resolved repetition loop: '%s' -> '%s'", text[:50], retry_text[:50])
+                    text = retry_text
+                    is_rep_resolved = True
+                    repetition_loops_resolved += 1
+
             # Confidence assessment
             avg_logprob = getattr(seg, "avg_logprob", 0.0)
             no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
@@ -399,7 +587,7 @@ def run_transcription_pipeline(
 
             is_uncertain = False
             confidence = "high"
-            if avg_logprob < -1.1 or no_speech_prob > 0.45 or compression_ratio > 2.4:
+            if avg_logprob < -1.1 or no_speech_prob > 0.45 or compression_ratio > 2.2 or (rep_info and not is_rep_resolved):
                 is_uncertain = True
                 confidence = "low"
             elif avg_logprob < -0.7 or no_speech_prob > 0.25:
@@ -421,8 +609,10 @@ def run_transcription_pipeline(
                 uncertain_reason = "low_acoustic_confidence"
             elif no_speech_prob > 0.45:
                 uncertain_reason = "potential_background_noise"
-            elif compression_ratio > 2.4:
+            elif compression_ratio > 2.2:
                 uncertain_reason = "possible_repetitive_loop"
+            elif rep_info and not is_rep_resolved:
+                uncertain_reason = "unresolved_repetition_loop"
 
             segments_list.append({
                 "id": len(segments_list) + 1,
@@ -435,6 +625,8 @@ def run_transcription_pipeline(
                 "avg_logprob": round(avg_logprob, 3),
                 "no_speech_prob": round(no_speech_prob, 3),
                 "compression_ratio": round(compression_ratio, 3),
+                "repetition_resolved": is_rep_resolved,
+                "original_loop_text": orig_loop_text,
                 "words": words_data,
             })
 
@@ -445,13 +637,41 @@ def run_transcription_pipeline(
                 progress_callback(pct, f"Transcribing audio: {format_duration(seg.end)} / {format_duration(total_audio_duration)}")
 
     except Exception as e:
-        if actual_device == "cuda" and is_cuda_error(e) and device_mode in ("auto", "cuda"):
+        if actual_device == "cuda" and is_cuda_error(e):
+            if device_mode == "cuda_only":
+                trans = log_device_transition(
+                    job_id=job_id,
+                    prev_device="cuda",
+                    new_device="cuda (FAILED - GPU Only Mode)",
+                    stage="lazy_generator_iteration",
+                    model_id=model_id,
+                    compute_type=actual_compute,
+                    reason=f"CUDA failure in GPU-Only diagnostic mode: {e}",
+                    exception=e,
+                )
+                device_transitions.append(trans)
+                logger.error("GPU-Only Diagnostic Mode: CUDA failure encountered at t=%.2fs. Halting without CPU fallback: %s", checkpoint_time, e)
+                raise RuntimeError(f"GPU-Only Diagnostic Mode Failure at t={checkpoint_time:.2f}s: {e}")
+
+            # Auto mode: Proceed with graceful CPU fallback
             logger.warning(
                 "CUDA runtime error encountered during inference at t=%.2fs: %s. Initiating graceful CPU fallback...",
                 checkpoint_time, e
             )
             cuda_fallback_occurred = True
             cuda_fallback_error = str(e)
+
+            trans = log_device_transition(
+                job_id=job_id,
+                prev_device="cuda",
+                new_device="cpu",
+                stage="lazy_generator_iteration",
+                model_id=model_id,
+                compute_type="int8",
+                reason=f"CUDA error fallback: {e}",
+                exception=e,
+            )
+            device_transitions.append(trans)
 
             if progress_callback:
                 progress_callback(
@@ -508,12 +728,14 @@ def run_transcription_pipeline(
                     language=target_lang,
                     initial_prompt=prompt,
                     beam_size=beam_size,
-                    temperature=0.0,
+                    temperature=[0.0, 0.2, 0.4],
+                    repetition_penalty=1.12,
+                    no_repeat_ngram_size=3,
+                    compression_ratio_threshold=2.2,
                     word_timestamps=True,
                     vad_filter=vad_filter,
                     vad_parameters=vad_parameters,
                     no_speech_threshold=0.6,
-                    compression_ratio_threshold=2.4,
                     condition_on_previous_text=False,
                 )
 
@@ -534,13 +756,36 @@ def run_transcription_pipeline(
                             continue
                         adj_start = segments_list[-1]["end"]
 
+                    # Pathological repetition loop detection on CPU
+                    rep_info = detect_repetition_in_segment(text)
+                    orig_loop_text = None
+                    is_rep_resolved = False
+                    if rep_info:
+                        repetition_loops_detected += 1
+                        logger.warning("Pathological repetition loop in CPU fallback [%.2f -> %.2f]", adj_start, adj_end)
+                        orig_loop_text = text
+                        retry_text = retry_segment_without_loops(
+                            model=cpu_model,
+                            audio_path=inference_audio,
+                            start=adj_start,
+                            end=adj_end,
+                            target_lang=target_lang,
+                            beam_size=beam_size,
+                            vad_parameters=vad_parameters,
+                            job_dir=job_dir,
+                        )
+                        if retry_text and not detect_repetition_in_segment(retry_text):
+                            text = retry_text
+                            is_rep_resolved = True
+                            repetition_loops_resolved += 1
+
                     avg_logprob = getattr(seg, "avg_logprob", 0.0)
                     no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
                     compression_ratio = getattr(seg, "compression_ratio", 1.0)
 
                     is_uncertain = False
                     confidence = "high"
-                    if avg_logprob < -1.1 or no_speech_prob > 0.45 or compression_ratio > 2.4:
+                    if avg_logprob < -1.1 or no_speech_prob > 0.45 or compression_ratio > 2.2 or (rep_info and not is_rep_resolved):
                         is_uncertain = True
                         confidence = "low"
                     elif avg_logprob < -0.7 or no_speech_prob > 0.25:
@@ -561,8 +806,10 @@ def run_transcription_pipeline(
                         uncertain_reason = "low_acoustic_confidence"
                     elif no_speech_prob > 0.45:
                         uncertain_reason = "potential_background_noise"
-                    elif compression_ratio > 2.4:
+                    elif compression_ratio > 2.2:
                         uncertain_reason = "possible_repetitive_loop"
+                    elif rep_info and not is_rep_resolved:
+                        uncertain_reason = "unresolved_repetition_loop"
 
                     segments_list.append({
                         "id": len(segments_list) + 1,
@@ -575,6 +822,8 @@ def run_transcription_pipeline(
                         "avg_logprob": round(avg_logprob, 3),
                         "no_speech_prob": round(no_speech_prob, 3),
                         "compression_ratio": round(compression_ratio, 3),
+                        "repetition_resolved": is_rep_resolved,
+                        "original_loop_text": orig_loop_text,
                         "words": words_data,
                     })
 
@@ -592,13 +841,31 @@ def run_transcription_pipeline(
             raise
 
     # Stage E: Verification Pass (if Maximum Accuracy mode enabled)
+    # Re-evaluates uncertain segments using the active model on the active device without device switching
     if accuracy_mode == "maximum" and progress_callback:
-        progress_callback(0.88, "Running Maximum Accuracy second-pass verification...")
-        uncertain_count = sum(1 for s in segments_list if s["uncertain"])
-        logger.info("Maximum Accuracy verification pass: %d/%d segments flagged for review", uncertain_count, len(segments_list))
-        for seg in segments_list:
-            if seg["uncertain"]:
-                logger.info("Segment [%s -> %s] uncertain (%s): %s", seg["start"], seg["end"], seg["uncertain_reason"], seg["text"][:60])
+        progress_callback(0.88, f"Running Maximum Accuracy verification pass on {actual_device.upper()}...")
+        uncertain_segments = [s for s in segments_list if s["uncertain"]]
+        logger.info("Maximum Accuracy verification: evaluating %d low-confidence segments on %s...",
+                    len(uncertain_segments), actual_device.upper())
+        active_model = model if actual_device == "cuda" else cpu_model
+        for seg_item in uncertain_segments:
+            try:
+                verified_text = verify_segment_accuracy(
+                    model=active_model,
+                    audio_path=inference_audio,
+                    start=seg_item["start"],
+                    end=seg_item["end"],
+                    target_lang=target_lang,
+                    job_dir=job_dir,
+                )
+                if verified_text and verified_text.strip() and not detect_repetition_in_segment(verified_text):
+                    logger.info("Segment [%.2f -> %.2f] verified: '%s' -> '%s'",
+                                seg_item["start"], seg_item["end"], seg_item["text"][:40], verified_text[:40])
+                    seg_item["text"] = verified_text.strip()
+                    seg_item["uncertain"] = False
+                    seg_item["is_verified"] = True
+            except Exception as e:
+                logger.warning("Verification error on segment %s: %s", seg_item["id"], e)
 
     # Stage F: Final Assembly and Exports
     if progress_callback:
@@ -623,6 +890,9 @@ def run_transcription_pipeline(
         "cuda_fallback": cuda_fallback_occurred,
         "cuda_fallback_error": cuda_fallback_error,
         "cuda_checkpoint_time": checkpoint_time if cuda_fallback_occurred else None,
+        "device_transitions": device_transitions,
+        "repetition_loops_detected": repetition_loops_detected,
+        "repetition_loops_resolved": repetition_loops_resolved,
         "accuracy_mode": accuracy_mode,
         "verbatim_mode": verbatim_mode,
         "enhanced": enhance_audio,

@@ -12,6 +12,7 @@ import {
   Repeat,
   History as HistoryIcon,
   Settings as SettingsIcon,
+  BarChart3,
   Cpu,
   Zap,
 } from 'lucide-react';
@@ -29,6 +30,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, hardwar
   const navItems = [
     { id: 'dashboard', label: t.navDashboard, icon: LayoutDashboard },
     { id: 'transcription', label: t.navTranscription, icon: Mic },
+    { id: 'benchmark', label: language === 'ar' ? 'المقارنة والدقة' : 'Benchmark', icon: BarChart3 },
     { id: 'converter', label: t.navConverter, icon: Repeat },
     { id: 'history', label: t.navHistory, icon: HistoryIcon },
     { id: 'settings', label: t.navSettings, icon: SettingsIcon },

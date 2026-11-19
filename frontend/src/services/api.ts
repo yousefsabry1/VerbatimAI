@@ -187,4 +187,48 @@ export const api = {
   getExportUrl(jobId: string, format: string, version: string = 'edited'): string {
     return `${API_BASE}/exports/${jobId}/${format}?version=${version}`;
   },
+
+  // Benchmarking
+  async getBenchmarkReference(): Promise<any> {
+    const res = await fetch(`${API_BASE}/benchmark/reference`);
+    if (!res.ok) throw new Error('Failed to fetch benchmark reference');
+    return res.json();
+  },
+
+  async saveBenchmarkReference(reference_text: string, start_time: number, end_time: number): Promise<any> {
+    const res = await fetch(`${API_BASE}/benchmark/reference`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reference_text, start_time, end_time }),
+    });
+    if (!res.ok) throw new Error('Failed to save benchmark reference');
+    return res.json();
+  },
+
+  async getBenchmarkResults(): Promise<{ has_results: boolean; results: any[] }> {
+    const res = await fetch(`${API_BASE}/benchmark/results`);
+    if (!res.ok) throw new Error('Failed to fetch benchmark results');
+    return res.json();
+  },
+
+  async runBenchmark(params: {
+    start_time: number;
+    end_time: number;
+    model_ids: string[];
+    device_mode: string;
+    use_hints: boolean;
+    custom_hints?: string | null;
+    eval_mode: string;
+  }): Promise<any> {
+    const res = await fetch(`${API_BASE}/benchmark/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Benchmark execution failed' }));
+      throw new Error(err.detail || 'Benchmark execution failed');
+    }
+    return res.json();
+  },
 };

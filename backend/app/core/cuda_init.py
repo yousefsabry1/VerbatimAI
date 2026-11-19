@@ -34,9 +34,12 @@ def register_nvidia_dll_directories() -> List[str]:
     if site.getusersitepackages():
         search_roots.append(site.getusersitepackages())
 
-    # Add python installation directory if not in search roots
+    # Add python installation directory, virtualenv, and base interpreter if not in search roots
     py_dir = os.path.dirname(sys.executable)
     search_roots.append(os.path.join(py_dir, "Lib", "site-packages"))
+    search_roots.append(os.path.join(sys.prefix, "Lib", "site-packages"))
+    if hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix:
+        search_roots.append(os.path.join(sys.base_prefix, "Lib", "site-packages"))
 
     target_packages = ["cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"]
 

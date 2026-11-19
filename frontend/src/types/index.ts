@@ -106,3 +106,44 @@ export interface ConversionPreset {
   name: string;
   description: string;
 }
+
+export interface WordAlignmentOp {
+  type: 'equal' | 'substitute' | 'delete' | 'insert';
+  ref: string | null;
+  hyp: string | null;
+}
+
+export interface BenchmarkRunResult {
+  model_id: string;
+  name: string;
+  status: 'success' | 'failed' | 'skipped';
+  error?: string;
+  device?: string;
+  compute?: string;
+  cuda_fallback?: boolean;
+  elapsed_seconds?: number;
+  speedup?: number;
+  norm_wer?: number;
+  norm_cer?: number;
+  norm_sub?: number;
+  norm_del?: number;
+  norm_ins?: number;
+  norm_hits?: number;
+  raw_wer?: number;
+  raw_cer?: number;
+  raw_sub?: number;
+  raw_del?: number;
+  raw_ins?: number;
+  predicted_text?: string;
+  word_alignment?: WordAlignmentOp[];
+}
+
+export interface BenchmarkReference {
+  has_reference: boolean;
+  raw_text: string;
+  normalized_text: string;
+  start_time: number;
+  end_time: number;
+  word_count_raw?: number;
+  word_count_norm?: number;
+}
