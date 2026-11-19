@@ -22,16 +22,17 @@ def test_get_benchmark_samples():
     test_samp = next((s for s in data["samples"] if s["sample_id"] == "test_180_225"), None)
     assert test_samp is not None
     assert test_samp["duration"] == 45.0
-    assert "UNVERIFIED" in test_samp["verification_badge"] or test_samp["status"] == "UNVERIFIED"
+    assert test_samp["status"] == "VERIFIED"
+    assert test_samp["word_count"] == 111
 
 
-def test_unverified_sample_reference_status():
+def test_verified_test_sample_reference_status():
     response = client.get("/api/benchmark/reference?sample_id=test_180_225")
     assert response.status_code == 200
     data = response.json()
     assert data["sample_id"] == "test_180_225"
-    assert data["is_human_verified"] is False
-    assert "UNVERIFIED" in data["verification_status"]
+    assert data["is_human_verified"] is True
+    assert data["word_count_raw"] == 111
 
 
 def test_verified_dev_sample_reference_status():

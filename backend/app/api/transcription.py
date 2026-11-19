@@ -1,11 +1,17 @@
 import json
+import time
 import asyncio
+import subprocess
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.core.config import STORAGE_DIR, SUPPORTED_MODELS
 from app.core.database import get_job, get_transcript, update_transcript_content
+from app.audio.metadata_extractor import find_ffmpeg
+from app.transcription.engine import run_transcription_pipeline, is_model_downloaded
 from app.services.job_manager import (
     submit_transcription_job,
     cancel_job,
@@ -167,3 +173,81 @@ def cancel_running_job(job_id: str):
 
     cancel_job(job_id)
     return {"status": "cancelled", "message": "Job cancellation requested"}
+
+
+class SuggestAlternativeRequest(BaseModel):
+    job_id: str
+    start: float
+    end: float
+    model_id: str = "large-v3-turbo"
+    device_mode: str = "auto"
+
+
+@router.post("/suggest-alternative")
+def suggest_alternative_segment(req: SuggestAlternativeRequest):
+    """
+    On-demand local prediction for a specific difficult segment using an alternative candidate model.
+    """
+    job = get_job(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    input_path = Path(job["input_path"])
+    if not input_path.exists():
+        raise HTTPException(status_code=404, detail="Source audio file not found on disk")
+
+    if not is_model_downloaded(req.model_id):
+        raise HTTPException(status_code=400, detail=f"Model '{req.model_id}' is not downloaded yet.")
+
+    duration = max(0.5, req.end - req.start)
+    ffmpeg = find_ffmpeg()
+    temp_dir = STORAGE_DIR / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_slice = temp_dir / f"alt_{req.job_id[:6]}_{int(req.start*100)}_{int(req.end*100)}.wav"
+
+    cmd = [
+        ffmpeg, "-y",
+        "-ss", str(req.start),
+        "-t", str(duration),
+        "-i", str(input_path),
+        "-vn", "-ac", "1", "-ar", "16000",
+        str(temp_slice),
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except subprocess.CalledProcessError as err:
+        raise HTTPException(status_code=500, detail=f"Audio slicing failed: {err.stderr.decode('utf-8', errors='replace')}")
+
+    try:
+        t0 = time.time()
+        res = run_transcription_pipeline(
+            input_path=temp_slice,
+            job_id=f"alt_{int(time.time())}",
+            model_id=req.model_id,
+            language="ar",
+            device_mode=req.device_mode,
+            compute_mode="auto",
+            accuracy_mode="maximum",
+            verbatim_mode="strict",
+            enhance_audio=False,
+            vad_filter=False,
+            vocabulary_hints=None,
+        )
+        elapsed = time.time() - t0
+        meta = res.get("metadata", {})
+
+        return {
+            "status": "success",
+            "job_id": req.job_id,
+            "start": req.start,
+            "end": req.end,
+            "model_id": req.model_id,
+            "model_name": SUPPORTED_MODELS.get(req.model_id, {}).get("name", req.model_id),
+            "suggested_text": res["clean_text"],
+            "device_used": meta.get("device_used"),
+            "compute_used": meta.get("compute_used"),
+            "elapsed_seconds": round(elapsed, 2),
+        }
+    finally:
+        temp_slice.unlink(missing_ok=True)
+

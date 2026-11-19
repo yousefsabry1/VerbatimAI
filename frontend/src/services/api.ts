@@ -108,6 +108,36 @@ export const api = {
     return res.json();
   },
 
+  async suggestAlternativeSegment(params: {
+    job_id: string;
+    start: number;
+    end: number;
+    model_id: string;
+    device_mode?: string;
+  }): Promise<{
+    status: string;
+    job_id: string;
+    start: number;
+    end: number;
+    model_id: string;
+    model_name: string;
+    suggested_text: string;
+    device_used?: string;
+    compute_used?: string;
+    elapsed_seconds: number;
+  }> {
+    const res = await fetch(`${API_BASE}/transcription/suggest-alternative`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to generate alternative suggestion' }));
+      throw new Error(err.detail || 'Failed to generate alternative suggestion');
+    }
+    return res.json();
+  },
+
   async cancelJob(jobId: string) {
     const res = await fetch(`${API_BASE}/transcription/${jobId}/cancel`, { method: 'POST' });
     if (!res.ok) throw new Error('Failed to cancel job');

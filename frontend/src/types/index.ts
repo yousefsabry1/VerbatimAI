@@ -27,6 +27,7 @@ export interface Segment {
   start: number;
   end: number;
   text: string;
+  original_text?: string;
   confidence: 'high' | 'medium' | 'low';
   uncertain: boolean;
   uncertain_reason?: string | null;
