@@ -45,12 +45,13 @@ export const Transcription: React.FC<TranscriptionProps> = ({
 
   // Settings State
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('small');
-  const [language, setLanguage] = useState<string>('auto');
+  const [selectedModel, setSelectedModel] = useState<string>('codeswitched-medium');
+  const [language, setLanguage] = useState<string>('ar');
   const [verbatimMode, setVerbatimMode] = useState<'strict' | 'clean'>('strict');
   const [accuracyMode, setAccuracyMode] = useState<'balanced' | 'maximum'>('balanced');
   const [enhanceAudio, setEnhanceAudio] = useState<boolean>(false);
   const [vadFilter, setVadFilter] = useState<boolean>(true);
+  const [vocabularyHints, setVocabularyHints] = useState<string>('');
   const [deviceMode, setDeviceMode] = useState<string>('auto');
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
 
@@ -148,6 +149,7 @@ export const Transcription: React.FC<TranscriptionProps> = ({
         verbatim_mode: verbatimMode,
         enhance_audio: enhanceAudio,
         vad_filter: vadFilter,
+        vocabulary_hints: vocabularyHints.trim() ? vocabularyHints.trim() : null,
       });
 
       setActiveJobId(res.job_id);
@@ -437,17 +439,36 @@ export const Transcription: React.FC<TranscriptionProps> = ({
             </button>
 
             {showAdvanced && (
-              <div className="space-y-2 p-3 rounded-xl bg-surface-950/80 border border-surface-800/80 text-xs">
-                <label className="text-surface-400 font-medium">{t.deviceModeLabel}</label>
-                <select
-                  value={deviceMode}
-                  onChange={e => setDeviceMode(e.target.value)}
-                  className="w-full rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1.5 text-xs text-white"
-                >
-                  <option value="auto">{t.deviceAuto}</option>
-                  <option value="cuda">{t.deviceCuda}</option>
-                  <option value="cpu">{t.deviceCpu}</option>
-                </select>
+              <div className="space-y-3 p-3 rounded-xl bg-surface-950/80 border border-surface-800/80 text-xs">
+                <div>
+                  <label className="text-surface-400 font-medium block mb-1">{t.deviceModeLabel}</label>
+                  <select
+                    value={deviceMode}
+                    onChange={e => setDeviceMode(e.target.value)}
+                    className="w-full rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1.5 text-xs text-white"
+                  >
+                    <option value="auto">{t.deviceAuto}</option>
+                    <option value="cuda">{t.deviceCuda}</option>
+                    <option value="cpu">{t.deviceCpu}</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-surface-400 font-medium block mb-1">
+                    Custom Vocabulary Hints (Optional)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={vocabularyHints}
+                    onChange={e => setVocabularyHints(e.target.value)}
+                    placeholder="e.g. IEEE, CIS, Chapter, Event, Proposal, Instructors, Huawei"
+                    className="w-full rounded-lg border border-surface-800 bg-surface-900 p-2 text-xs text-white placeholder:text-surface-600 focus:outline-none focus:border-brand-500 resize-none font-mono"
+                    dir="ltr"
+                  />
+                  <p className="text-[10px] text-surface-500 mt-1">
+                    Factual domain terms to improve recognition without biasing colloquial conversation.
+                  </p>
+                </div>
               </div>
             )}
 
@@ -673,9 +694,17 @@ export const Transcription: React.FC<TranscriptionProps> = ({
 
                         <div className="flex items-center gap-2">
                           {seg.uncertain && (
-                            <span className="flex items-center gap-1 rounded-md bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-400 border border-amber-500/20">
+                            <span
+                              className="flex items-center gap-1 rounded-md bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-400 border border-amber-500/20"
+                              title={seg.uncertain_reason ? `Flagged: ${seg.uncertain_reason}` : 'Uncertain segment'}
+                            >
                               <AlertTriangle className="h-3 w-3" />
                               {t.uncertainBadge}
+                              {seg.uncertain_reason && (
+                                <span className="opacity-75 font-normal">
+                                  ({seg.uncertain_reason.replace(/_/g, ' ')})
+                                </span>
+                              )}
                             </span>
                           )}
                           <span className="text-[11px] font-mono text-surface-500">#{seg.id}</span>

@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/transcription", tags=["transcription"])
 
 class TranscriptionRequest(BaseModel):
     file_id: str
-    model_id: str = "medium"
+    model_id: str = "codeswitched-medium"
     language: Optional[str] = None
     device_mode: str = "auto"
     compute_mode: str = "auto"
@@ -28,6 +28,7 @@ class TranscriptionRequest(BaseModel):
     verbatim_mode: str = "strict"    # "strict" or "clean"
     enhance_audio: bool = False
     vad_filter: bool = True
+    vocabulary_hints: Optional[str] = None
 
 
 class TranscriptUpdateRequest(BaseModel):
@@ -50,6 +51,7 @@ def submit_job(req: TranscriptionRequest):
         verbatim_mode=req.verbatim_mode,
         enhance_audio=req.enhance_audio,
         vad_filter=req.vad_filter,
+        vocabulary_hints=req.vocabulary_hints,
     )
 
     return {

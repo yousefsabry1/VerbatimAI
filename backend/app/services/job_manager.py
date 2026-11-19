@@ -74,7 +74,7 @@ def cancel_job(job_id: str) -> bool:
 def submit_transcription_job(
     input_path: Path,
     input_filename: str,
-    model_id: str = "medium",
+    model_id: str = "codeswitched-medium",
     language: Optional[str] = None,
     device_mode: str = "auto",
     compute_mode: str = "auto",
@@ -82,6 +82,7 @@ def submit_transcription_job(
     verbatim_mode: str = "strict",
     enhance_audio: bool = False,
     vad_filter: bool = True,
+    vocabulary_hints: Optional[str] = None,
 ) -> str:
     job_id = uuid.uuid4().hex[:10]
     meta = extract_metadata(input_path)
@@ -107,6 +108,7 @@ def submit_transcription_job(
             "verbatim_mode": verbatim_mode,
             "enhanced": enhance_audio,
             "vad": vad_filter,
+            "vocabulary_hints": vocabulary_hints,
         }
     }
     create_job(job_data)
@@ -134,6 +136,7 @@ def submit_transcription_job(
                 verbatim_mode=verbatim_mode,
                 enhance_audio=enhance_audio,
                 vad_filter=vad_filter,
+                vocabulary_hints=vocabulary_hints,
                 progress_callback=on_progress,
             )
 

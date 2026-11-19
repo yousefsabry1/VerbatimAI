@@ -29,6 +29,10 @@ export interface Segment {
   text: string;
   confidence: 'high' | 'medium' | 'low';
   uncertain: boolean;
+  uncertain_reason?: string | null;
+  avg_logprob?: number;
+  no_speech_prob?: number;
+  compression_ratio?: number;
   words?: Word[];
 }
 

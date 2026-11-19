@@ -72,6 +72,7 @@ export const api = {
     verbatim_mode: string;
     enhance_audio: boolean;
     vad_filter: boolean;
+    vocabulary_hints?: string | null;
   }): Promise<{ job_id: string; status: string }> {
     const res = await fetch(`${API_BASE}/transcription/submit`, {
       method: 'POST',

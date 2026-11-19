@@ -21,6 +21,14 @@ for d in [STORAGE_DIR, UPLOADS_DIR, OUTPUTS_DIR, MODELS_DIR]:
 
 # Hardware and Model Configurations
 SUPPORTED_MODELS = {
+    "codeswitched-medium": {
+        "id": "codeswitched-medium",
+        "name": "Egyptian Arabic & English (Specialized)",
+        "repo": "Seif-Eldeen-Sameh/whisper-medium-arabic-codeswitched-ct2",
+        "approx_vram_gb": 3.0,
+        "approx_download_gb": 0.78,
+        "recommended_for": "Fine-tuned specifically for Egyptian colloquial Arabic mixed with English technical terms",
+    },
     "small": {
         "id": "small",
         "name": "Fast — small",
@@ -35,7 +43,7 @@ SUPPORTED_MODELS = {
         "repo": "Systran/faster-whisper-medium",
         "approx_vram_gb": 3.0,
         "approx_download_gb": 1.5,
-        "recommended_for": "Recommended default: high accuracy with balanced speed",
+        "recommended_for": "Standard Whisper multilingual model for general speech",
     },
     "large-v3": {
         "id": "large-v3",
@@ -56,10 +64,10 @@ SUPPORTED_OUTPUT_FORMATS = [
     "mp3", "wav", "ogg", "opus", "m4a", "aac", "flac", "aiff", "webm"
 ]
 
-EGYPTIAN_ARABIC_PROMPT = (
-    "هذا تسجيل صوتي بالعامية المصرية والإنجليزية مع مصطلحات تقنية ومحادثات عمل مثل: "
-    "meeting, team, project, deadline, call, client, feedback, update, sprint, task, zoom, "
-    "واتساب، ميتنج، بروجكت، تيم، ديدلاين، كول، شغال، تمام، أوكي، يعني."
+# Neutral, clean vocabulary hints without meta-explanatory sentences
+DEFAULT_VOCAB_HINTS = (
+    "IEEE, CIS, IEEE Egypt Section, Branch, Chapter, Proposal, Event, "
+    "Instructors, Certified Instructors, Academy, Hosting, Closing Ceremony, STEM, AI, Volunteers, Huawei"
 )
 
 MAX_UPLOAD_SIZE_BYTES = 1024 * 1024 * 500  # 500 MB max file size for local desktop app

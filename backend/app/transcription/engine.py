@@ -13,7 +13,7 @@ from app.core.config import (
     MODELS_DIR,
     OUTPUTS_DIR,
     SUPPORTED_MODELS,
-    EGYPTIAN_ARABIC_PROMPT,
+    DEFAULT_VOCAB_HINTS,
 )
 from app.audio.metadata_extractor import find_ffmpeg, extract_metadata
 from app.exports.formatters import (
@@ -93,8 +93,75 @@ def download_model(model_id: str, progress_callback: Optional[Callable[[float, s
 
         return target_dir
     except Exception as e:
-        logger.error("Failed to download model %s: %s", model_id, e)
-        raise RuntimeError(f"Model download failed: {e}")
+        logger.warning("Standard snapshot_download failed for %s (%s). Attempting resilient TLS 1.2 download...", model_id, e)
+        if progress_callback:
+            progress_callback(0.10, f"Attempting resilient download for {model_info['name']}...")
+        
+        try:
+            _resilient_download(repo_id, target_dir, progress_callback)
+            (target_dir / ".ready").write_text(f"ready={model_id}\nrepo={repo_id}\n", encoding="utf-8")
+            if progress_callback:
+                progress_callback(1.0, f"Model {model_info['name']} ready")
+            return target_dir
+        except Exception as e2:
+            logger.error("Failed to download model %s: %s | Resilient error: %s", model_id, e, e2)
+            raise RuntimeError(f"Model download failed: {e2}")
+
+
+def _resilient_download(repo_id: str, target_dir: Path, progress_callback: Optional[Callable[[float, str], None]] = None):
+    import ssl
+    import time
+    import urllib.request
+    
+    ctx = ssl.create_default_context()
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), _NoRedirect)
+
+    def _resolve(url: str) -> str:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with opener.open(req, timeout=20) as resp:
+                return resp.geturl()
+        except urllib.error.HTTPError as err:
+            if err.code in (301, 302, 303, 307, 308):
+                return err.headers.get("Location")
+            raise
+
+    # Download required files
+    files = [
+        (f"https://huggingface.co/{repo_id}/raw/main/config.json", target_dir / "config.json", False),
+        (f"https://huggingface.co/{repo_id}/raw/main/vocabulary.json", target_dir / "vocabulary.json", False),
+        (f"https://huggingface.co/{repo_id}/raw/main/README.md", target_dir / "README.md", False),
+        (f"https://huggingface.co/{repo_id}/resolve/main/model.bin", target_dir / "model.bin", True),
+    ]
+
+    for idx, (url, dest, is_lfs) in enumerate(files, 1):
+        if dest.exists() and dest.stat().st_size > 0 and not is_lfs:
+            continue
+        final_url = _resolve(url) if is_lfs else url
+        req = urllib.request.Request(final_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            if dest.exists() and total > 0 and dest.stat().st_size == total:
+                continue
+            part = dest.with_suffix(dest.suffix + ".part")
+            downloaded = 0
+            with open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 512)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total > 0 and is_lfs:
+                        p = 0.10 + 0.85 * (downloaded / total)
+                        progress_callback(p, f"Downloading {dest.name}: {downloaded // (1024*1024)}MB / {total // (1024*1024)}MB")
+            part.replace(dest)
 
 
 def get_compute_type(compute_mode: str, device: str) -> str:
@@ -212,7 +279,7 @@ def prepare_inference_audio(
 def run_transcription_pipeline(
     input_path: Path,
     job_id: str,
-    model_id: str = "medium",
+    model_id: str = "codeswitched-medium",
     language: Optional[str] = None,
     device_mode: str = "auto",
     compute_mode: str = "auto",
@@ -220,6 +287,7 @@ def run_transcription_pipeline(
     verbatim_mode: str = "strict",     # "strict" or "clean"
     enhance_audio: bool = False,
     vad_filter: bool = True,
+    vocabulary_hints: Optional[str] = None,
     progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -251,12 +319,27 @@ def run_transcription_pipeline(
         progress_callback=progress_callback,
     )
 
-    # Setup Egyptian Arabic / English prompt
-    prompt = EGYPTIAN_ARABIC_PROMPT if (language in (None, "ar", "auto")) else None
+    # Setup Vocabulary Hints & Prompt
+    # Clean domain recognition hints only — no hallucinating explanatory sentences
+    if vocabulary_hints and vocabulary_hints.strip():
+        prompt = vocabulary_hints.strip()
+    elif model_id == "codeswitched-medium" or language in ("ar", "auto", None):
+        prompt = DEFAULT_VOCAB_HINTS
+    else:
+        prompt = None
+
+    # Language determination
+    # For specialized Egyptian model or Arabic speech, pin target_lang to 'ar' to eliminate foreign script hallucinations
+    if model_id == "codeswitched-medium":
+        target_lang = "ar"
+    elif language in ("auto", "none", None):
+        target_lang = None
+    else:
+        target_lang = language
 
     # Inference settings
     beam_size = 5 if accuracy_mode == "maximum" else 4
-    vad_parameters = dict(min_silence_duration_ms=600) if vad_filter else None
+    vad_parameters = dict(min_silence_duration_ms=500, speech_pad_ms=300) if vad_filter else None
 
     if progress_callback:
         progress_callback(0.20, f"Transcribing speech with Faster-Whisper ({actual_device.upper()})...")
@@ -265,12 +348,15 @@ def run_transcription_pipeline(
     try:
         segments_gen, info = model.transcribe(
             str(inference_audio),
-            language=None if language in ("auto", "none", None) else language,
+            language=target_lang,
             initial_prompt=prompt,
             beam_size=beam_size,
+            temperature=0.0,
             word_timestamps=True,
             vad_filter=vad_filter,
             vad_parameters=vad_parameters,
+            no_speech_threshold=0.6,
+            compression_ratio_threshold=2.4,
             condition_on_previous_text=False,  # Prevents repetition loops in conversational audio
         )
     except Exception as e:
@@ -286,12 +372,15 @@ def run_transcription_pipeline(
             )
             segments_gen, info = model.transcribe(
                 str(inference_audio),
-                language=None if language in ("auto", "none", None) else language,
+                language=target_lang,
                 initial_prompt=prompt,
                 beam_size=beam_size,
+                temperature=0.0,
                 word_timestamps=True,
                 vad_filter=vad_filter,
                 vad_parameters=vad_parameters,
+                no_speech_threshold=0.6,
+                compression_ratio_threshold=2.4,
                 condition_on_previous_text=False,
             )
         else:
@@ -330,6 +419,14 @@ def run_transcription_pipeline(
                     "probability": round(getattr(w, "probability", 1.0), 3),
                 })
 
+        uncertain_reason = None
+        if avg_logprob < -1.1:
+            uncertain_reason = "low_acoustic_confidence"
+        elif no_speech_prob > 0.45:
+            uncertain_reason = "potential_background_noise"
+        elif compression_ratio > 2.4:
+            uncertain_reason = "possible_repetitive_loop"
+
         segments_list.append({
             "id": idx,
             "start": round(seg.start, 2),
@@ -337,6 +434,10 @@ def run_transcription_pipeline(
             "text": text,
             "confidence": confidence,
             "uncertain": is_uncertain,
+            "uncertain_reason": uncertain_reason,
+            "avg_logprob": round(avg_logprob, 3),
+            "no_speech_prob": round(no_speech_prob, 3),
+            "compression_ratio": round(compression_ratio, 3),
             "words": words_data,
         })
 
@@ -346,11 +447,12 @@ def run_transcription_pipeline(
 
     # Stage E: Verification Pass (if Maximum Accuracy mode enabled)
     if accuracy_mode == "maximum" and progress_callback:
-        progress_callback(0.88, "Running Maximum Accuracy verification pass...")
-        # Check uncertain segments and smooth boundaries
+        progress_callback(0.88, "Running Maximum Accuracy second-pass verification...")
+        uncertain_count = sum(1 for s in segments_list if s["uncertain"])
+        logger.info("Maximum Accuracy verification pass: %d/%d segments flagged for review", uncertain_count, len(segments_list))
         for seg in segments_list:
             if seg["uncertain"]:
-                logger.info("Uncertain segment flagged for user review at [%s - %s]: %s", seg["start"], seg["end"], seg["text"])
+                logger.info("Segment [%s -> %s] uncertain (%s): %s", seg["start"], seg["end"], seg["uncertain_reason"], seg["text"][:60])
 
     # Stage F: Final Assembly and Exports
     if progress_callback:
