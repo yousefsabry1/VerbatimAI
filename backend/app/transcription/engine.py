@@ -1,10 +1,14 @@
 import os
 import sys
+import gc
 import shutil
 import logging
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Callable
+
+from app.core.cuda_init import register_nvidia_dll_directories
+register_nvidia_dll_directories()
 
 from faster_whisper import WhisperModel
 from huggingface_hub import snapshot_download
@@ -169,13 +173,19 @@ def get_compute_type(compute_mode: str, device: str) -> str:
         return compute_mode
     # Auto logic
     if device == "cuda":
-        return "float16"
+        # int8_float16 provides maximum throughput and uses ~1.0GB VRAM, ideal for 4GB RTX 3050 Laptop GPU
+        return "int8_float16"
     return "int8"
 
 
 def is_cuda_error(err: Exception) -> bool:
     msg = (str(err) + " " + repr(err)).lower()
-    keywords = ["cublas", "cudnn", "cudart", "cuda", "dll", "out of memory", "not found", "failed to load"]
+    keywords = [
+        "cublas", "cudnn", "cudart", "cuda", "nvrtc", "driver",
+        "out of memory", "oom", "illegal memory access",
+        "device-side assert", "failed to load", "not found",
+        "ctranslate2::cuda"
+    ]
     return any(k in msg for k in keywords)
 
 
@@ -344,7 +354,15 @@ def run_transcription_pipeline(
     if progress_callback:
         progress_callback(0.20, f"Transcribing speech with Faster-Whisper ({actual_device.upper()})...")
 
-    # Run inference
+    initial_device = actual_device
+    initial_compute = actual_compute
+    cuda_fallback_occurred = False
+    cuda_fallback_error = None
+    checkpoint_time = 0.0
+    segments_list = []
+    total_audio_duration = source_meta["duration"]
+
+    # Run inference with robust lazy generator error handling and checkpoint resumption
     try:
         segments_gen, info = model.transcribe(
             str(inference_audio),
@@ -359,91 +377,219 @@ def run_transcription_pipeline(
             compression_ratio_threshold=2.4,
             condition_on_previous_text=False,  # Prevents repetition loops in conversational audio
         )
+
+        for idx, seg in enumerate(segments_gen, start=1):
+            # Test hook for simulating CUDA failure during generator iteration
+            if (
+                os.environ.get("VERBATIM_SIMULATE_CUDA_ERROR")
+                and actual_device == "cuda"
+                and len(segments_list) >= 1
+            ):
+                os.environ.pop("VERBATIM_SIMULATE_CUDA_ERROR", None)
+                raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded (simulated CUDA generator failure)")
+
+            text = seg.text.strip()
+            if not text:
+                continue
+
+            # Confidence assessment
+            avg_logprob = getattr(seg, "avg_logprob", 0.0)
+            no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
+            compression_ratio = getattr(seg, "compression_ratio", 1.0)
+
+            is_uncertain = False
+            confidence = "high"
+            if avg_logprob < -1.1 or no_speech_prob > 0.45 or compression_ratio > 2.4:
+                is_uncertain = True
+                confidence = "low"
+            elif avg_logprob < -0.7 or no_speech_prob > 0.25:
+                confidence = "medium"
+
+            # Word-level breakdown
+            words_data = []
+            if getattr(seg, "words", None):
+                for w in seg.words:
+                    words_data.append({
+                        "word": w.word,
+                        "start": round(w.start, 2),
+                        "end": round(w.end, 2),
+                        "probability": round(getattr(w, "probability", 1.0), 3),
+                    })
+
+            uncertain_reason = None
+            if avg_logprob < -1.1:
+                uncertain_reason = "low_acoustic_confidence"
+            elif no_speech_prob > 0.45:
+                uncertain_reason = "potential_background_noise"
+            elif compression_ratio > 2.4:
+                uncertain_reason = "possible_repetitive_loop"
+
+            segments_list.append({
+                "id": len(segments_list) + 1,
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+                "text": text,
+                "confidence": confidence,
+                "uncertain": is_uncertain,
+                "uncertain_reason": uncertain_reason,
+                "avg_logprob": round(avg_logprob, 3),
+                "no_speech_prob": round(no_speech_prob, 3),
+                "compression_ratio": round(compression_ratio, 3),
+                "words": words_data,
+            })
+
+            checkpoint_time = round(seg.end, 2)
+
+            if progress_callback and total_audio_duration > 0:
+                pct = 0.20 + (0.65 * min(1.0, seg.end / total_audio_duration))
+                progress_callback(pct, f"Transcribing audio: {format_duration(seg.end)} / {format_duration(total_audio_duration)}")
+
     except Exception as e:
-        if actual_device == "cuda" and is_cuda_error(e) and device_mode == "auto":
-            logger.warning("CUDA error during transcription. Falling back to CPU: %s", e)
+        if actual_device == "cuda" and is_cuda_error(e) and device_mode in ("auto", "cuda"):
+            logger.warning(
+                "CUDA runtime error encountered during inference at t=%.2fs: %s. Initiating graceful CPU fallback...",
+                checkpoint_time, e
+            )
+            cuda_fallback_occurred = True
+            cuda_fallback_error = str(e)
+
             if progress_callback:
-                progress_callback(0.25, "CUDA memory/driver issue detected. Falling back to CPU...")
-            model, actual_device, actual_compute = load_whisper_model(
+                progress_callback(
+                    min(0.85, 0.20 + (0.65 * min(1.0, checkpoint_time / max(1.0, total_audio_duration)))),
+                    f"CUDA GPU error at {format_duration(checkpoint_time)}. Switching to CPU and resuming..."
+                )
+
+            # Release GPU resources safely
+            try:
+                cache_key = (model_id, "cuda", actual_compute)
+                _LOADED_MODELS_CACHE.pop(cache_key, None)
+                del model
+            except Exception:
+                pass
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+            # Load CPU model
+            cpu_model, actual_device, actual_compute = load_whisper_model(
                 model_id=model_id,
                 device_mode="cpu",
                 compute_mode="int8",
                 progress_callback=progress_callback,
             )
-            segments_gen, info = model.transcribe(
-                str(inference_audio),
-                language=target_lang,
-                initial_prompt=prompt,
-                beam_size=beam_size,
-                temperature=0.0,
-                word_timestamps=True,
-                vad_filter=vad_filter,
-                vad_parameters=vad_parameters,
-                no_speech_threshold=0.6,
-                compression_ratio_threshold=2.4,
-                condition_on_previous_text=False,
-            )
+
+            # Determine remaining audio to transcribe
+            remaining_duration = total_audio_duration - checkpoint_time
+            if remaining_duration > 0.3:
+                logger.info(
+                    "Resuming remaining %.2fs audio on CPU from checkpoint t=%.2fs",
+                    remaining_duration, checkpoint_time
+                )
+                remaining_audio = job_dir / f"resumed_from_{int(checkpoint_time * 1000)}ms.wav"
+                ffmpeg = find_ffmpeg()
+                cmd = [
+                    ffmpeg, "-y",
+                    "-ss", str(checkpoint_time),
+                    "-i", str(inference_audio),
+                    "-vn", "-ac", "1", "-ar", "16000",
+                    str(remaining_audio),
+                ]
+                sub_res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+                if sub_res.returncode != 0:
+                    logger.error("FFmpeg slice failed: %s", sub_res.stderr)
+                    raise RuntimeError(f"Failed to slice audio for fallback: {sub_res.stderr[-200:]}")
+
+                cpu_segments_gen, cpu_info = cpu_model.transcribe(
+                    str(remaining_audio),
+                    language=target_lang,
+                    initial_prompt=prompt,
+                    beam_size=beam_size,
+                    temperature=0.0,
+                    word_timestamps=True,
+                    vad_filter=vad_filter,
+                    vad_parameters=vad_parameters,
+                    no_speech_threshold=0.6,
+                    compression_ratio_threshold=2.4,
+                    condition_on_previous_text=False,
+                )
+
+                if 'info' not in locals():
+                    info = cpu_info
+
+                for seg in cpu_segments_gen:
+                    text = seg.text.strip()
+                    if not text:
+                        continue
+
+                    adj_start = round(seg.start + checkpoint_time, 2)
+                    adj_end = round(seg.end + checkpoint_time, 2)
+
+                    # Smooth boundary handling: prevent overlap with previous segment
+                    if segments_list and adj_start < segments_list[-1]["end"]:
+                        if adj_end <= segments_list[-1]["end"]:
+                            continue
+                        adj_start = segments_list[-1]["end"]
+
+                    avg_logprob = getattr(seg, "avg_logprob", 0.0)
+                    no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
+                    compression_ratio = getattr(seg, "compression_ratio", 1.0)
+
+                    is_uncertain = False
+                    confidence = "high"
+                    if avg_logprob < -1.1 or no_speech_prob > 0.45 or compression_ratio > 2.4:
+                        is_uncertain = True
+                        confidence = "low"
+                    elif avg_logprob < -0.7 or no_speech_prob > 0.25:
+                        confidence = "medium"
+
+                    words_data = []
+                    if getattr(seg, "words", None):
+                        for w in seg.words:
+                            words_data.append({
+                                "word": w.word,
+                                "start": round(w.start + checkpoint_time, 2),
+                                "end": round(w.end + checkpoint_time, 2),
+                                "probability": round(getattr(w, "probability", 1.0), 3),
+                            })
+
+                    uncertain_reason = None
+                    if avg_logprob < -1.1:
+                        uncertain_reason = "low_acoustic_confidence"
+                    elif no_speech_prob > 0.45:
+                        uncertain_reason = "potential_background_noise"
+                    elif compression_ratio > 2.4:
+                        uncertain_reason = "possible_repetitive_loop"
+
+                    segments_list.append({
+                        "id": len(segments_list) + 1,
+                        "start": adj_start,
+                        "end": adj_end,
+                        "text": text,
+                        "confidence": confidence,
+                        "uncertain": is_uncertain,
+                        "uncertain_reason": uncertain_reason,
+                        "avg_logprob": round(avg_logprob, 3),
+                        "no_speech_prob": round(no_speech_prob, 3),
+                        "compression_ratio": round(compression_ratio, 3),
+                        "words": words_data,
+                    })
+
+                    if progress_callback and total_audio_duration > 0:
+                        pct = 0.20 + (0.65 * min(1.0, adj_end / total_audio_duration))
+                        progress_callback(pct, f"Transcribing audio (CPU): {format_duration(adj_end)} / {format_duration(total_audio_duration)}")
+
+                try:
+                    remaining_audio.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            else:
+                logger.info("CUDA error occurred at end of audio (t=%.2fs). No remaining audio.", checkpoint_time)
         else:
             raise
-
-    # Collect segments with progress
-    segments_list = []
-    total_audio_duration = source_meta["duration"]
-
-    for idx, seg in enumerate(segments_gen, start=1):
-        text = seg.text.strip()
-        if not text:
-            continue
-
-        # Confidence assessment
-        avg_logprob = getattr(seg, "avg_logprob", 0.0)
-        no_speech_prob = getattr(seg, "no_speech_prob", 0.0)
-        compression_ratio = getattr(seg, "compression_ratio", 1.0)
-
-        is_uncertain = False
-        confidence = "high"
-        if avg_logprob < -1.1 or no_speech_prob > 0.45 or compression_ratio > 2.4:
-            is_uncertain = True
-            confidence = "low"
-        elif avg_logprob < -0.7 or no_speech_prob > 0.25:
-            confidence = "medium"
-
-        # Word-level breakdown
-        words_data = []
-        if getattr(seg, "words", None):
-            for w in seg.words:
-                words_data.append({
-                    "word": w.word,
-                    "start": round(w.start, 2),
-                    "end": round(w.end, 2),
-                    "probability": round(getattr(w, "probability", 1.0), 3),
-                })
-
-        uncertain_reason = None
-        if avg_logprob < -1.1:
-            uncertain_reason = "low_acoustic_confidence"
-        elif no_speech_prob > 0.45:
-            uncertain_reason = "potential_background_noise"
-        elif compression_ratio > 2.4:
-            uncertain_reason = "possible_repetitive_loop"
-
-        segments_list.append({
-            "id": idx,
-            "start": round(seg.start, 2),
-            "end": round(seg.end, 2),
-            "text": text,
-            "confidence": confidence,
-            "uncertain": is_uncertain,
-            "uncertain_reason": uncertain_reason,
-            "avg_logprob": round(avg_logprob, 3),
-            "no_speech_prob": round(no_speech_prob, 3),
-            "compression_ratio": round(compression_ratio, 3),
-            "words": words_data,
-        })
-
-        if progress_callback and total_audio_duration > 0:
-            pct = 0.20 + (0.65 * min(1.0, seg.end / total_audio_duration))
-            progress_callback(pct, f"Transcribing audio: {format_duration(seg.end)} / {format_duration(total_audio_duration)}")
 
     # Stage E: Verification Pass (if Maximum Accuracy mode enabled)
     if accuracy_mode == "maximum" and progress_callback:
@@ -468,11 +614,15 @@ def run_transcription_pipeline(
         "input_filename": input_path.name,
         "duration": source_meta["duration"],
         "duration_formatted": source_meta["duration_formatted"],
-        "detected_language": info.language,
-        "language_probability": round(info.language_probability, 3),
+        "detected_language": getattr(info, "language", "ar") if 'info' in locals() else "ar",
+        "language_probability": round(getattr(info, "language_probability", 1.0), 3) if 'info' in locals() else 1.0,
         "model_used": model_id,
         "device_used": actual_device,
         "compute_used": actual_compute,
+        "initial_device": initial_device,
+        "cuda_fallback": cuda_fallback_occurred,
+        "cuda_fallback_error": cuda_fallback_error,
+        "cuda_checkpoint_time": checkpoint_time if cuda_fallback_occurred else None,
         "accuracy_mode": accuracy_mode,
         "verbatim_mode": verbatim_mode,
         "enhanced": enhance_audio,

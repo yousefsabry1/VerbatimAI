@@ -4,6 +4,9 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+from app.core.cuda_init import register_nvidia_dll_directories
+register_nvidia_dll_directories()
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

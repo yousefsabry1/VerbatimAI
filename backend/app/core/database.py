@@ -112,6 +112,24 @@ def update_job_progress(job_id: str, progress: float, stage: str):
     conn.close()
 
 
+def update_job_device(job_id: str, device: str, compute: Optional[str] = None, stage: Optional[str] = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    query = "UPDATE jobs SET device_used = ?"
+    params = [device]
+    if compute:
+        query += ", compute_used = ?"
+        params.append(compute)
+    if stage:
+        query += ", stage = ?"
+        params.append(stage)
+    query += " WHERE id = ?"
+    params.append(job_id)
+    cursor.execute(query, params)
+    conn.commit()
+    conn.close()
+
+
 def complete_job(job_id: str, output_files: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None):
     conn = get_connection()
     cursor = conn.cursor()
@@ -127,6 +145,12 @@ def complete_job(job_id: str, output_files: Dict[str, Any], metadata: Optional[D
     if metadata is not None:
         query += ", metadata_json = ?"
         params.append(json.dumps(metadata))
+        if "device_used" in metadata:
+            query += ", device_used = ?"
+            params.append(metadata["device_used"])
+        if "compute_used" in metadata:
+            query += ", compute_used = ?"
+            params.append(metadata["compute_used"])
 
     query += " WHERE id = ?"
     params.append(job_id)

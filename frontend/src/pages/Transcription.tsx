@@ -21,6 +21,9 @@ import {
   CheckCircle2,
   ChevronDown,
   Info,
+  Cpu,
+  Zap,
+  AlertOctagon,
 } from 'lucide-react';
 
 interface TranscriptionProps {
@@ -59,6 +62,7 @@ export const Transcription: React.FC<TranscriptionProps> = ({
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<Job | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [jobError, setJobError] = useState<string | null>(null);
 
   // Review Workspace State
   const [transcriptData, setTranscriptData] = useState<TranscriptResult | null>(null);
@@ -136,6 +140,7 @@ export const Transcription: React.FC<TranscriptionProps> = ({
   const handleStartTranscription = async () => {
     if (!uploadedFileId) return;
     setIsProcessing(true);
+    setJobError(null);
     setTranscriptData(null);
 
     try {
@@ -157,7 +162,7 @@ export const Transcription: React.FC<TranscriptionProps> = ({
       // Start polling status
       pollJobStatus(res.job_id);
     } catch (err: any) {
-      alert(err.message || 'Failed to submit transcription job');
+      setJobError(err.message || 'Failed to submit transcription job');
       setIsProcessing(false);
     }
   };
@@ -170,13 +175,17 @@ export const Transcription: React.FC<TranscriptionProps> = ({
 
         if (job.status === 'completed') {
           clearInterval(interval);
+          setJobError(null);
           loadCompletedJob(jobId);
-        } else if (job.status === 'failed' || job.status === 'cancelled') {
+        } else if (job.status === 'failed') {
           clearInterval(interval);
           setIsProcessing(false);
-          alert(job.error_message || 'Transcription failed');
+          setJobError(job.error_message || 'Transcription failed on both GPU and CPU.');
+        } else if (job.status === 'cancelled') {
+          clearInterval(interval);
+          setIsProcessing(false);
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('Polling error', err);
       }
     }, 1200);
@@ -486,9 +495,46 @@ export const Transcription: React.FC<TranscriptionProps> = ({
         </div>
       )}
 
+      {/* Failure State Card */}
+      {jobError && !isProcessing && (
+        <div className="rounded-2xl border border-rose-500/40 bg-rose-950/20 p-8 text-center space-y-5 shadow-2xl max-w-xl mx-auto animate-fadeIn light:bg-rose-50 light:border-rose-200">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-rose-500/10 text-rose-400 border border-rose-500/30">
+            <AlertOctagon className="h-8 w-8" />
+          </div>
+          <div className="space-y-2">
+            <h3 className="text-lg font-bold text-rose-300 light:text-rose-900">
+              Transcription Failed
+            </h3>
+            <p className="text-xs text-rose-200/90 light:text-rose-800 max-w-md mx-auto font-mono bg-surface-950/60 light:bg-white p-3 rounded-lg border border-rose-500/20 break-words">
+              {jobError}
+            </p>
+            <p className="text-[11px] text-surface-400 light:text-surface-600">
+              Both GPU and CPU processing failed or encountered an unrecoverable format or runtime error.
+            </p>
+          </div>
+          <div className="flex justify-center gap-3">
+            <button
+              onClick={() => {
+                setJobError(null);
+                setDeviceMode('cpu');
+              }}
+              className="rounded-xl border border-surface-700 bg-surface-800 px-4 py-2 text-xs font-semibold text-white hover:bg-surface-700 transition-colors"
+            >
+              Retry on CPU Only
+            </button>
+            <button
+              onClick={() => setJobError(null)}
+              className="rounded-xl bg-brand-600 px-4 py-2 text-xs font-semibold text-white hover:bg-brand-500 transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Live Processing Card */}
       {isProcessing && (
-        <div className="rounded-2xl border border-surface-800 bg-surface-900/80 p-8 text-center space-y-6 shadow-2xl backdrop-blur-md max-w-xl mx-auto light:border-surface-200 light:bg-white">
+        <div className="rounded-2xl border border-surface-800 bg-surface-900/80 p-8 text-center space-y-6 shadow-2xl backdrop-blur-md max-w-xl mx-auto light:border-surface-200 light:bg-white animate-fadeIn">
           <div className="relative mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20">
             <Sparkles className="h-10 w-10 animate-spin" />
           </div>
@@ -502,6 +548,48 @@ export const Transcription: React.FC<TranscriptionProps> = ({
             </p>
           </div>
 
+          {/* Device & Model Status Badges */}
+          <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
+            {/* Device Badge */}
+            <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-semibold border ${
+              jobStatus?.stage?.includes('CPU') || jobStatus?.device_used === 'cpu'
+                ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+            }`}>
+              {jobStatus?.stage?.includes('CPU') || jobStatus?.device_used === 'cpu' ? (
+                <>
+                  <Cpu className="h-3.5 w-3.5" />
+                  <span>Device: CPU Mode</span>
+                </>
+              ) : (
+                <>
+                  <Zap className="h-3.5 w-3.5" />
+                  <span>Device: GPU (CUDA Accelerated)</span>
+                </>
+              )}
+            </span>
+
+            {/* Model Badge */}
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full font-semibold bg-surface-800/80 text-surface-300 border border-surface-700">
+              <span>Model: {jobStatus?.model_used || selectedModel}</span>
+            </span>
+          </div>
+
+          {/* CUDA Fallback Notification Banner */}
+          {(jobStatus?.stage?.includes('Switching to CPU') ||
+            jobStatus?.stage?.includes('CPU fallback') ||
+            jobStatus?.metadata?.cuda_fallback) && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-left rtl:text-right flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+              <div className="text-xs space-y-0.5">
+                <p className="font-bold text-amber-300">GPU Acceleration Fallback Triggered</p>
+                <p className="text-amber-200/80">
+                  A GPU runtime issue occurred. The pipeline automatically switched to CPU mode without losing previously recognized speech.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Progress bar */}
           <div className="space-y-1.5">
             <div className="h-2.5 w-full rounded-full bg-surface-800 overflow-hidden light:bg-surface-200">
@@ -511,8 +599,8 @@ export const Transcription: React.FC<TranscriptionProps> = ({
               />
             </div>
             <div className="flex justify-between text-xs text-surface-400">
-              <span>Stage: {jobStatus?.stage || 'Preparing'}</span>
-              <span>{Math.round((jobStatus?.progress || 0.1) * 100)}%</span>
+              <span className="truncate max-w-[70%] text-left rtl:text-right">Stage: {jobStatus?.stage || 'Preparing'}</span>
+              <span className="font-mono font-bold text-brand-400">{Math.round((jobStatus?.progress || 0.1) * 100)}%</span>
             </div>
           </div>
 
@@ -539,9 +627,25 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                   <h2 className="text-lg font-bold text-white light:text-surface-900">
                     {transcriptData.job.input_filename}
                   </h2>
-                  <p className="text-xs text-surface-400">
-                    Model: {transcriptData.job.model_used} • Language: {transcriptData.job.metadata.detected_language?.toUpperCase() || 'Auto'} • {segments.length} segments
-                  </p>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-surface-400 mt-1">
+                    <span>Model: <strong className="text-surface-200">{transcriptData.job.model_used}</strong></span>
+                    <span>•</span>
+                    <span>Language: <strong className="text-surface-200">{transcriptData.job.metadata?.detected_language?.toUpperCase() || 'Auto'}</strong></span>
+                    <span>•</span>
+                    <span>{segments.length} segments</span>
+                    <span>•</span>
+                    <span className="inline-flex items-center gap-1 font-semibold">
+                      {transcriptData.job.metadata?.cuda_fallback ? (
+                        <span className="text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/30">
+                          CPU Fallback (from GPU at {formatTime(transcriptData.job.metadata.cuda_checkpoint_time || 0)})
+                        </span>
+                      ) : (
+                        <span className="text-brand-400">
+                          Device: {transcriptData.job.device_used?.toUpperCase() || 'GPU'} ({transcriptData.job.compute_used || 'auto'})
+                        </span>
+                      )}
+                    </span>
+                  </div>
                 </div>
               </div>
 

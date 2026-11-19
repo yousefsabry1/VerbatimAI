@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, Callable, List
 from app.core.database import (
     create_job,
     update_job_progress,
+    update_job_device,
     complete_job,
     fail_job,
     get_job,
@@ -121,6 +122,8 @@ def submit_transcription_job(
             def on_progress(p: float, s: str):
                 if job_id in _ACTIVE_CANCELLATIONS:
                     raise RuntimeError("Job cancelled")
+                if "Switching to CPU" in s or "Falling back to CPU" in s:
+                    update_job_device(job_id, "cpu", "int8", stage=s)
                 broadcast_progress(job_id, p, s, status="processing")
 
             broadcast_progress(job_id, 0.02, "Starting transcription job...", status="processing")
@@ -210,6 +213,8 @@ def submit_conversion_job(
             def on_progress(p: float, s: str):
                 if job_id in _ACTIVE_CANCELLATIONS:
                     raise RuntimeError("Job cancelled")
+                if "Switching to CPU" in s or "Falling back to CPU" in s:
+                    update_job_device(job_id, "cpu", "int8", stage=s)
                 broadcast_progress(job_id, p, s, status="processing")
 
             broadcast_progress(job_id, 0.05, "Starting audio conversion...", status="processing")

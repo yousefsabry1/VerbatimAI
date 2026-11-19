@@ -4,6 +4,9 @@ import subprocess
 import multiprocessing
 from fastapi import APIRouter
 
+from app.core.cuda_init import register_nvidia_dll_directories
+register_nvidia_dll_directories()
+
 router = APIRouter(prefix="/api/hardware", tags=["hardware"])
 
 
