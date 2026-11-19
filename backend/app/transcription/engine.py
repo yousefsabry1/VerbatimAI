@@ -528,15 +528,11 @@ def run_transcription_pipeline(
             language=target_lang,
             initial_prompt=prompt,
             beam_size=beam_size,
-            temperature=[0.0, 0.2, 0.4],
-            repetition_penalty=1.12,
-            no_repeat_ngram_size=3,
-            compression_ratio_threshold=2.2,
-            word_timestamps=False,
+            condition_on_previous_text=True,
             vad_filter=vad_filter,
             vad_parameters=vad_parameters,
             no_speech_threshold=0.8,
-            condition_on_previous_text=False,  # Prevents repetition loops in conversational audio
+            word_timestamps=False,
         )
 
         for idx, seg in enumerate(segments_gen, start=1):
@@ -728,15 +724,11 @@ def run_transcription_pipeline(
                     language=target_lang,
                     initial_prompt=prompt,
                     beam_size=beam_size,
-                    temperature=[0.0, 0.2, 0.4],
-                    repetition_penalty=1.12,
-                    no_repeat_ngram_size=3,
-                    compression_ratio_threshold=2.2,
-                    word_timestamps=False,
+                    condition_on_previous_text=True,
                     vad_filter=vad_filter,
                     vad_parameters=vad_parameters,
                     no_speech_threshold=0.8,
-                    condition_on_previous_text=False,
+                    word_timestamps=False,
                 )
 
                 if 'info' not in locals():
