@@ -532,10 +532,10 @@ def run_transcription_pipeline(
             repetition_penalty=1.12,
             no_repeat_ngram_size=3,
             compression_ratio_threshold=2.2,
-            word_timestamps=True,
+            word_timestamps=False,
             vad_filter=vad_filter,
             vad_parameters=vad_parameters,
-            no_speech_threshold=0.6,
+            no_speech_threshold=0.8,
             condition_on_previous_text=False,  # Prevents repetition loops in conversational audio
         )
 
@@ -732,10 +732,10 @@ def run_transcription_pipeline(
                     repetition_penalty=1.12,
                     no_repeat_ngram_size=3,
                     compression_ratio_threshold=2.2,
-                    word_timestamps=True,
+                    word_timestamps=False,
                     vad_filter=vad_filter,
                     vad_parameters=vad_parameters,
-                    no_speech_threshold=0.6,
+                    no_speech_threshold=0.8,
                     condition_on_previous_text=False,
                 )
 

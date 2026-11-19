@@ -414,6 +414,33 @@ export const Transcription: React.FC<TranscriptionProps> = ({
               </select>
             </div>
 
+            {/* Quick Optimal Settings Preset for Egyptian Audio */}
+            <div className="p-2.5 rounded-xl bg-brand-500/10 border border-brand-500/20 text-xs space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-brand-300 flex items-center gap-1.5">
+                  <Sparkles className="h-3.5 w-3.5 text-brand-400" />
+                  <span>Optimal Egyptian Audio Preset</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedModel('codeswitched-medium');
+                    setVadFilter(false);
+                    setVocabularyHints('محادثة بالعامية المصرية ومصطلحات تقنية وتنظيمية بالإنجليزية.');
+                    setAccuracyMode('maximum');
+                    setVerbatimMode('strict');
+                    showToast('Applied optimal Egyptian ASR settings!');
+                  }}
+                  className="px-2 py-0.5 rounded-md bg-brand-600 text-white font-semibold text-[11px] hover:bg-brand-500 transition-colors"
+                >
+                  Apply Preset
+                </button>
+              </div>
+              <p className="text-[10px] text-surface-400 leading-normal">
+                Applies Code-Switched Medium, disables VAD (prevents clipping opening words), sets maximum accuracy, and applies colloquial context.
+              </p>
+            </div>
+
             {/* Checkboxes: Enhancement & VAD */}
             <div className="space-y-2 pt-2 border-t border-surface-800/60 light:border-surface-100">
               <label className="flex items-center gap-2 cursor-pointer text-xs text-surface-300 light:text-surface-700">
@@ -433,7 +460,12 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                   onChange={e => setVadFilter(e.target.checked)}
                   className="rounded border-surface-700 text-brand-500 focus:ring-0"
                 />
-                <span>{t.vadLabel}</span>
+                <div>
+                  <span className="font-semibold">{t.vadLabel}</span>
+                  <span className="text-[10px] text-surface-500 block">
+                    (Disable for WhatsApp voice notes or soft intros to prevent clipping opening words)
+                  </span>
+                </div>
               </label>
             </div>
 
@@ -463,16 +495,35 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                 </div>
 
                 <div>
-                  <label className="text-surface-400 font-medium block mb-1">
-                    Custom Vocabulary Hints (Optional)
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-surface-400 font-medium">
+                      Custom Vocabulary Hints (Optional)
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setVocabularyHints('محادثة بالعامية المصرية ومصطلحات تقنية وتنظيمية بالإنجليزية.')}
+                        className="text-[10px] text-brand-400 hover:text-brand-300 underline font-sans"
+                      >
+                        + Egyptian Context
+                      </button>
+                      <span className="text-surface-600">•</span>
+                      <button
+                        type="button"
+                        onClick={() => setVocabularyHints('')}
+                        className="text-[10px] text-surface-500 hover:text-surface-400 underline font-sans"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
                   <textarea
                     rows={2}
                     value={vocabularyHints}
                     onChange={e => setVocabularyHints(e.target.value)}
-                    placeholder="e.g. IEEE, CIS, Chapter, Event, Proposal, Instructors, Huawei"
-                    className="w-full rounded-lg border border-surface-800 bg-surface-900 p-2 text-xs text-white placeholder:text-surface-600 focus:outline-none focus:border-brand-500 resize-none font-mono"
-                    dir="ltr"
+                    placeholder="e.g. محادثة بالعامية المصرية ومصطلحات تقنية وتنظيمية بالإنجليزية."
+                    className="w-full rounded-lg border border-surface-800 bg-surface-900 p-2 text-xs text-white placeholder:text-surface-600 focus:outline-none focus:border-brand-500 resize-none font-sans"
+                    dir="rtl"
                   />
                   <p className="text-[10px] text-surface-500 mt-1">
                     Factual domain terms to improve recognition without biasing colloquial conversation.
