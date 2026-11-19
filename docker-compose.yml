@@ -1,0 +1,14 @@
+services:
+  verbatim-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: verbatim-ai
+    ports:
+      - "8000:8000"
+    environment:
+      - VERBATIM_HOST=0.0.0.0
+      - VERBATIM_PORT=8000
+    volumes:
+      - ./backend/storage:/app/backend/storage
+    restart: unless-stopped
