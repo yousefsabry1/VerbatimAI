@@ -33,11 +33,32 @@ class BenchmarkRunRequest(BaseModel):
     audio_path_or_id: Optional[str] = None
     start_time: float = 0.0
     end_time: float = 103.0
-    model_ids: List[str] = ["codeswitched-medium", "medium"]
+    model_ids: List[str] = ["codeswitched-medium", "medium", "large-v3-turbo"]
     device_mode: str = "auto"  # "auto", "cuda_only", "cpu"
     use_hints: bool = False
     custom_hints: Optional[str] = None
     eval_mode: str = "normalized"  # "normalized" or "raw"
+    vad_filter: bool = True
+
+
+class LiveAlignRequest(BaseModel):
+    reference_text: str
+    hypothesis_text: str
+    eval_mode: str = "normalized"
+
+
+@router.post("/align")
+def live_recalculate_alignment(req: LiveAlignRequest):
+    """
+    Recalculates word-level alignment and WER/CER metrics live for human review and corrections.
+    """
+    mode = req.eval_mode if req.eval_mode in ("normalized", "raw") else "normalized"
+    res = calculate_wer_cer(req.reference_text, req.hypothesis_text, mode=mode)
+    return {
+        "status": "success",
+        "mode": mode,
+        "metrics": res,
+    }
 
 
 @router.get("/reference")
@@ -175,6 +196,8 @@ def run_benchmark(req: BenchmarkRunRequest):
                 compute_mode="auto",
                 accuracy_mode="balanced",
                 verbatim_mode="strict",
+                enhance_audio=False,
+                vad_filter=req.vad_filter,
                 vocabulary_hints=hints,
             )
             elapsed = time.time() - t0

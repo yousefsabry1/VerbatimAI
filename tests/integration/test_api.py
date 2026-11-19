@@ -26,7 +26,30 @@ def test_api_models():
     assert res.status_code == 200
     data = res.json()
     assert "models" in data
-    assert len(data["models"]) >= 3
+    model_ids = [m["id"] for m in data["models"]]
+    assert "codeswitched-medium" in model_ids
+    assert "large-v3-turbo" in model_ids
+
+
+def test_api_benchmark_reference():
+    res = client.get("/api/benchmark/reference")
+    assert res.status_code == 200
+    data = res.json()
+    assert "has_reference" in data
+    assert "raw_text" in data
+
+
+def test_api_benchmark_live_align():
+    res = client.post("/api/benchmark/align", json={
+        "reference_text": "مساء الفل يا صبري",
+        "hypothesis_text": "مساء الفل يا صبري",
+        "eval_mode": "normalized"
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert data["metrics"]["wer_percent"] == 0.0
+    assert data["metrics"]["hits"] == 4
 
 
 def test_api_conversion_formats():

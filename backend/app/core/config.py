@@ -45,6 +45,14 @@ SUPPORTED_MODELS = {
         "approx_download_gb": 1.5,
         "recommended_for": "Standard Whisper multilingual model for general speech",
     },
+    "large-v3-turbo": {
+        "id": "large-v3-turbo",
+        "name": "State-of-the-Art — large-v3-turbo",
+        "repo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+        "approx_vram_gb": 2.5,
+        "approx_download_gb": 1.6,
+        "recommended_for": "Latest OpenAI Whisper Large-v3-Turbo architecture (800M params, 128 mel bins, 4x faster)",
+    },
     "large-v3": {
         "id": "large-v3",
         "name": "Maximum Quality — large-v3",

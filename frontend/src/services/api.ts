@@ -219,6 +219,7 @@ export const api = {
     use_hints: boolean;
     custom_hints?: string | null;
     eval_mode: string;
+    vad_filter?: boolean;
   }): Promise<any> {
     const res = await fetch(`${API_BASE}/benchmark/run`, {
       method: 'POST',
@@ -229,6 +230,16 @@ export const api = {
       const err = await res.json().catch(() => ({ detail: 'Benchmark execution failed' }));
       throw new Error(err.detail || 'Benchmark execution failed');
     }
+    return res.json();
+  },
+
+  async liveAlign(reference_text: string, hypothesis_text: string, eval_mode: string = 'normalized'): Promise<any> {
+    const res = await fetch(`${API_BASE}/benchmark/align`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reference_text, hypothesis_text, eval_mode }),
+    });
+    if (!res.ok) throw new Error('Failed to recalculate alignment');
     return res.json();
   },
 };
