@@ -100,6 +100,8 @@ export interface ModelInfo {
   is_downloading: boolean;
   download_progress: number;
   status_message: string;
+  is_experimental?: boolean;
+  benchmark_only?: boolean;
 }
 
 export interface ConversionPreset {
@@ -179,4 +181,80 @@ export interface BenchmarkReference {
   word_count_raw?: number;
   word_count_norm?: number;
   updated_at?: number;
+}
+
+export interface DiffChunk {
+  type: 'equal' | 'substitute' | 'insert' | 'delete';
+  primary: string | null;
+  alternative: string | null;
+}
+
+export interface AlternativeHypothesis {
+  id: string;
+  job_id: string;
+  segment_id: number;
+  model_id: string;
+  model_name: string;
+  start_time: number;
+  end_time: number;
+  extracted_start: number;
+  extracted_end: number;
+  context_padding: number;
+  hypothesis_text: string;
+  primary_text: string;
+  diff: DiffChunk[];
+  disagreement_score: number;
+  device_used?: string;
+  compute_used?: string;
+  elapsed_seconds?: number;
+  is_cached?: boolean;
+  created_at?: string;
+}
+
+export interface SegmentReviewItem {
+  segment_id: number;
+  start: number;
+  end: number;
+  text: string;
+  original_text: string;
+  review_status: 'unreviewed' | 'review_suggested' | 'alternative_available' | 'human_reviewed';
+  is_flagged: boolean;
+  flag_label: string;
+  flag_reasons: string[];
+  severity: 'high' | 'medium' | 'low' | 'none';
+  alternatives_count: number;
+  latest_alternative?: AlternativeHypothesis | null;
+  human_notes?: string | null;
+  reviewed_at?: string | null;
+}
+
+export interface JobReviewsResponse {
+  job_id: string;
+  total_segments: number;
+  flagged_count: number;
+  reviewed_count: number;
+  items: SegmentReviewItem[];
+}
+
+export interface VerifySegmentResponse {
+  status: string;
+  is_cached: boolean;
+  hypothesis_id: string;
+  job_id: string;
+  segment_id: number;
+  model_id: string;
+  model_name: string;
+  start_time: number;
+  end_time: number;
+  extracted_start: number;
+  extracted_end: number;
+  context_padding: number;
+  hypothesis_text: string;
+  primary_text: string;
+  diff: DiffChunk[];
+  disagreement_score: number;
+  device_used?: string;
+  compute_used?: string;
+  elapsed_seconds?: number;
+  peak_vram_mb?: number;
 }

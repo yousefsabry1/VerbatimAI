@@ -62,6 +62,16 @@ SUPPORTED_MODELS = {
         "approx_download_gb": 3.1,
         "recommended_for": "Highest accuracy for difficult audio, accents, and mixed speech",
     },
+    "qwencleo-asr-4bit": {
+        "id": "qwencleo-asr-4bit",
+        "name": "QwenCleo-ASR (1.7B, 4-bit NF4)",
+        "repo": "mohammedaly22/QwenCleo-ASR",
+        "approx_vram_gb": 2.2,
+        "approx_download_gb": 4.1,
+        "recommended_for": "Experimental Egyptian-English code-switched audio LLM (Benchmark comparison only)",
+        "is_experimental": True,
+        "benchmark_only": True,
+    },
     "qwen3-asr-0.6b-hf": {
         "id": "qwen3-asr-0.6b-hf",
         "name": "Qwen3-ASR 0.6B (Experimental Multilingual)",

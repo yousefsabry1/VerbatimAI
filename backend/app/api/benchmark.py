@@ -592,6 +592,47 @@ def get_latest_results(sample_id: str = Query("dev_0_103")):
         }
 
 
+def run_qwencleo_benchmark(active_audio: Path, duration: float, device_mode: str) -> Dict[str, Any]:
+    """
+    Executes QwenCleo 4-bit inference in an isolated subprocess using experimental_venv.
+    Guarantees zero dependency collision with production Faster-Whisper and complete VRAM release.
+    """
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    exp_py = project_root / "experimental_venv" / "Scripts" / "python.exe"
+    runner_py = project_root / "backend" / "app" / "transcription" / "qwencleo_runner.py"
+
+    if not exp_py.exists():
+        raise RuntimeError(f"Isolated experimental python environment not found at {exp_py}")
+    if not runner_py.exists():
+        raise RuntimeError(f"QwenCleo runner script not found at {runner_py}")
+
+    temp_out = BENCHMARK_DIR / f"qwencleo_run_{int(time.time() * 1000)}.json"
+    target_device = "cuda" if device_mode != "cpu" else "cpu"
+
+    cmd = [
+        str(exp_py),
+        str(runner_py),
+        "--audio", str(active_audio),
+        "--output", str(temp_out),
+        "--device", target_device,
+    ]
+
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        if proc.returncode != 0 or not temp_out.exists():
+            err_msg = proc.stderr.strip() or proc.stdout.strip() or f"Process exited with code {proc.returncode}"
+            raise RuntimeError(f"QwenCleo execution failed: {err_msg}")
+
+        result_data = json.loads(temp_out.read_text(encoding="utf-8"))
+        if result_data.get("status") == "error":
+            raise RuntimeError(result_data.get("error", "Unknown error in QwenCleo runner"))
+
+        return result_data
+    finally:
+        if temp_out.exists():
+            temp_out.unlink(missing_ok=True)
+
+
 @router.post("/run")
 def run_benchmark(req: BenchmarkRunRequest):
     """
@@ -659,22 +700,39 @@ def run_benchmark(req: BenchmarkRunRequest):
         t0 = time.time()
 
         try:
-            res = run_transcription_pipeline(
-                input_path=active_audio,
-                job_id=job_id,
-                model_id=model_id,
-                language="ar",
-                device_mode=req.device_mode,
-                compute_mode="auto",
-                accuracy_mode="maximum",
-                verbatim_mode="strict",
-                enhance_audio=False,
-                vad_filter=req.vad_filter,
-                vocabulary_hints=hints,
-            )
-            elapsed = time.time() - t0
-            pred_text = res["clean_text"]
-            meta = res["metadata"]
+            if model_id == "qwencleo-asr-4bit":
+                qwen_res = run_qwencleo_benchmark(active_audio, duration, req.device_mode)
+                elapsed = qwen_res.get("elapsed_seconds", time.time() - t0)
+                pred_text = qwen_res.get("text", "")
+                device_used = qwen_res.get("device", "cuda")
+                compute_used = qwen_res.get("compute", "4-bit NF4")
+                cuda_fallback = False
+                dev_transitions = []
+                rep_detected = 0
+                rep_resolved = 0
+            else:
+                res = run_transcription_pipeline(
+                    input_path=active_audio,
+                    job_id=job_id,
+                    model_id=model_id,
+                    language="ar",
+                    device_mode=req.device_mode,
+                    compute_mode="auto",
+                    accuracy_mode="maximum",
+                    verbatim_mode="strict",
+                    enhance_audio=False,
+                    vad_filter=req.vad_filter,
+                    vocabulary_hints=hints,
+                )
+                elapsed = time.time() - t0
+                pred_text = res["clean_text"]
+                meta = res["metadata"]
+                device_used = meta.get("device_used")
+                compute_used = meta.get("compute_used")
+                cuda_fallback = meta.get("cuda_fallback", False)
+                dev_transitions = meta.get("device_transitions", [])
+                rep_detected = meta.get("repetition_loops_detected", 0)
+                rep_resolved = meta.get("repetition_loops_resolved", 0)
 
             run_entry: Dict[str, Any] = {
                 "sample_id": current_sample_id,
@@ -683,12 +741,12 @@ def run_benchmark(req: BenchmarkRunRequest):
                 "model_id": model_id,
                 "name": SUPPORTED_MODELS.get(model_id, {}).get("name", model_id),
                 "status": "success",
-                "device": meta.get("device_used"),
-                "compute": meta.get("compute_used"),
-                "cuda_fallback": meta.get("cuda_fallback", False),
-                "device_transitions": meta.get("device_transitions", []),
-                "repetition_loops_detected": meta.get("repetition_loops_detected", 0),
-                "repetition_loops_resolved": meta.get("repetition_loops_resolved", 0),
+                "device": device_used,
+                "compute": compute_used,
+                "cuda_fallback": cuda_fallback,
+                "device_transitions": dev_transitions,
+                "repetition_loops_detected": rep_detected,
+                "repetition_loops_resolved": rep_resolved,
                 "elapsed_seconds": round(elapsed, 2),
                 "speedup": round(duration / max(0.1, elapsed), 2),
                 "predicted_text": pred_text,

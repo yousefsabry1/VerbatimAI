@@ -45,6 +45,9 @@ def get_model_dir(model_id: str) -> Path:
 
 
 def is_model_downloaded(model_id: str) -> bool:
+    if model_id == "qwencleo-asr-4bit":
+        target_dir = MODELS_DIR / "qwencleo-asr"
+        return (target_dir / "model.safetensors").exists() and (target_dir / "config.json").exists()
     target_dir = get_model_dir(model_id)
     marker = target_dir / ".ready"
     if marker.exists():
@@ -57,7 +60,10 @@ def is_model_downloaded(model_id: str) -> bool:
 
 
 def get_model_folder_size_gb(model_id: str) -> float:
-    target_dir = get_model_dir(model_id)
+    if model_id == "qwencleo-asr-4bit":
+        target_dir = MODELS_DIR / "qwencleo-asr"
+    else:
+        target_dir = get_model_dir(model_id)
     if not target_dir.exists():
         return 0.0
     total = 0
@@ -73,6 +79,12 @@ def get_model_folder_size_gb(model_id: str) -> float:
 def download_model(model_id: str, progress_callback: Optional[Callable[[float, str], None]] = None) -> Path:
     if model_id not in SUPPORTED_MODELS:
         raise ValueError(f"Unknown model identifier: {model_id}")
+
+    if model_id == "qwencleo-asr-4bit":
+        raise RuntimeError(
+            "Auto-download is disabled for experimental QwenCleo 4-bit model. "
+            "Please install weights manually into storage/models/qwencleo-asr/."
+        )
 
     model_info = SUPPORTED_MODELS[model_id]
     repo_id = model_info["repo"]

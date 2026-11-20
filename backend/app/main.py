@@ -23,6 +23,7 @@ from app.api.conversion import router as conversion_router
 from app.api.history import router as history_router
 from app.api.exports import router as exports_router
 from app.api.benchmark import router as benchmark_router
+from app.api.review import router as review_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +75,7 @@ app.include_router(conversion_router)
 app.include_router(history_router)
 app.include_router(exports_router)
 app.include_router(benchmark_router)
+app.include_router(review_router)
 
 
 # Mount Static Frontend if built

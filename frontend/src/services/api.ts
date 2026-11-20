@@ -1,4 +1,14 @@
-import type { AudioMetadata, HardwareInfo, Job, ModelInfo, Segment, TranscriptResult } from '../types';
+import type {
+  AudioMetadata,
+  HardwareInfo,
+  Job,
+  ModelInfo,
+  Segment,
+  TranscriptResult,
+  AlternativeHypothesis,
+  JobReviewsResponse,
+  VerifySegmentResponse,
+} from '../types';
 
 const API_BASE = '/api';
 
@@ -310,5 +320,66 @@ export const api = {
     });
     if (!res.ok) throw new Error('Failed to recalculate alignment');
     return res.json();
+  },
+
+  // Second-Pass & Review Workspace Endpoints
+  async verifySegment(
+    jobId: string,
+    segmentId: number,
+    params: {
+      model_id?: string;
+      context_padding?: number;
+      device_mode?: string;
+      force_recompute?: boolean;
+    } = {}
+  ): Promise<VerifySegmentResponse> {
+    const res = await fetch(`${API_BASE}/review/${encodeURIComponent(jobId)}/segment/${segmentId}/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Verification failed' }));
+      throw new Error(err.detail || 'Verification request failed');
+    }
+    return res.json();
+  },
+
+  async getSegmentAlternatives(
+    jobId: string,
+    segmentId: number
+  ): Promise<{ job_id: string; segment_id: number; count: number; hypotheses: AlternativeHypothesis[] }> {
+    const res = await fetch(`${API_BASE}/review/${encodeURIComponent(jobId)}/segment/${segmentId}/alternatives`);
+    if (!res.ok) throw new Error('Failed to fetch segment alternatives');
+    return res.json();
+  },
+
+  async getJobReviews(jobId: string): Promise<JobReviewsResponse> {
+    const res = await fetch(`${API_BASE}/review/${encodeURIComponent(jobId)}/reviews`);
+    if (!res.ok) throw new Error('Failed to fetch job reviews');
+    return res.json();
+  },
+
+  async updateReviewStatus(
+    jobId: string,
+    segmentId: number,
+    params: {
+      review_status: string;
+      selected_alternative_id?: string | null;
+      human_notes?: string | null;
+      flag_reasons?: string[];
+    }
+  ): Promise<any> {
+    const res = await fetch(`${API_BASE}/review/${encodeURIComponent(jobId)}/segment/${segmentId}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) throw new Error('Failed to update review status');
+    return res.json();
+  },
+
+  getSegmentAudioUrl(jobId: string, segmentId: number, padding: number = 1.0): string {
+    return `${API_BASE}/review/${encodeURIComponent(jobId)}/segment/${segmentId}/audio?padding=${padding}`;
   },
 };

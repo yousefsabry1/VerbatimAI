@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useI18n } from '../context/I18nContext';
-import { AudioMetadata, HardwareInfo, Job, ModelInfo, Segment, TranscriptResult } from '../types';
+import { AudioMetadata, HardwareInfo, Job, ModelInfo, Segment, TranscriptResult, SegmentReviewItem } from '../types';
 import { api } from '../services/api';
 import { AudioPlayer, AudioPlayerRef } from '../components/AudioPlayer';
+import { SegmentVerificationModal } from '../components/SegmentVerificationModal';
+import { ReviewQueuePanel } from '../components/ReviewQueuePanel';
 import {
   UploadCloud,
   FileAudio,
@@ -34,6 +36,7 @@ import {
   AlertCircle,
   Columns,
   List,
+  ListFilter,
 } from 'lucide-react';
 
 interface TranscriptionProps {
@@ -115,6 +118,15 @@ export const Transcription: React.FC<TranscriptionProps> = ({
 
   // Alternative Model Suggestions Map (segmentId -> AlternativeSuggestionState)
   const [alternativeMap, setAlternativeMap] = useState<{ [segmentId: number]: AlternativeSuggestionState }>({});
+
+  // Review Queue & Intelligent Second-Pass Verification State
+  const [showReviewQueue, setShowReviewQueue] = useState<boolean>(true);
+  const [reviewQueueItems, setReviewQueueItems] = useState<SegmentReviewItem[]>([]);
+  const [reviewTotalSegments, setReviewTotalSegments] = useState<number>(0);
+  const [reviewFlaggedCount, setReviewFlaggedCount] = useState<number>(0);
+  const [reviewReviewedCount, setReviewReviewedCount] = useState<number>(0);
+  const [verificationModalOpen, setVerificationModalOpen] = useState<boolean>(false);
+  const [selectedVerificationSegment, setSelectedVerificationSegment] = useState<Segment | null>(null);
 
   // Element refs for segment scrolling
   const segmentRefs = useRef<{ [key: number]: HTMLDivElement | null }>({});
@@ -243,10 +255,72 @@ export const Transcription: React.FC<TranscriptionProps> = ({
       if (!draftRecovered) {
         setSaveStatus('saved');
       }
+      loadJobReviews(jobId);
     } catch (err) {
       console.error('Failed to load completed transcript', err);
       localStorage.removeItem('verbatim_active_job_id');
       if (onClearInitialJob) onClearInitialJob();
+    }
+  };
+
+  const loadJobReviews = useCallback(async (jobId: string) => {
+    try {
+      const res = await api.getJobReviews(jobId);
+      setReviewQueueItems(res.items || []);
+      setReviewTotalSegments(res.total_segments || 0);
+      setReviewFlaggedCount(res.flagged_count || 0);
+      setReviewReviewedCount(res.reviewed_count || 0);
+    } catch (e) {
+      console.warn('Failed to load review queue:', e);
+    }
+  }, []);
+
+  const handleOpenVerification = (seg: Segment) => {
+    setSelectedVerificationSegment(seg);
+    setVerificationModalOpen(true);
+  };
+
+  const handleApplyVerificationText = async (newText: string) => {
+    if (!selectedVerificationSegment || !activeJobId) return;
+    const segId = selectedVerificationSegment.id;
+
+    handleSegmentTextChange(segId, newText);
+
+    try {
+      await api.updateReviewStatus(activeJobId, segId, {
+        review_status: 'human_reviewed',
+        human_notes: 'Adopted via AI Verification modal',
+      });
+      loadJobReviews(activeJobId);
+    } catch (e) {
+      console.warn('Failed to update review status:', e);
+    }
+
+    showToast(`Adopted text for Segment #${segId} & marked reviewed`);
+  };
+
+  const handleMarkSegmentReviewed = async (segmentId: number) => {
+    if (!activeJobId) return;
+    const currentItem = reviewQueueItems.find(i => i.segment_id === segmentId);
+    const nextStatus = currentItem?.review_status === 'human_reviewed' ? 'unreviewed' : 'human_reviewed';
+
+    try {
+      await api.updateReviewStatus(activeJobId, segmentId, {
+        review_status: nextStatus,
+      });
+      loadJobReviews(activeJobId);
+      showToast(nextStatus === 'human_reviewed' ? `Segment #${segmentId} marked reviewed` : `Segment #${segmentId} unmarked`);
+    } catch (e) {
+      console.warn('Failed to update review status:', e);
+    }
+  };
+
+  const handleQueueSelectSegment = (segmentId: number, startTime: number) => {
+    playerRef.current?.seekTo(startTime);
+    setActiveSegmentId(segmentId);
+    const el = segmentRefs.current[segmentId];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   };
 
@@ -892,7 +966,7 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                   onChange={e => setSelectedModel(e.target.value)}
                   className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none"
                 >
-                  {models.map(m => (
+                  {models.filter(m => !m.benchmark_only).map(m => (
                     <option key={m.id} value={m.id}>
                       {m.name} ({m.is_downloaded ? 'Downloaded' : 'Download Needed'})
                     </option>
@@ -1196,6 +1270,21 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                   Auto-Scroll: {autoScroll ? 'ON' : 'OFF'}
                 </button>
 
+                {/* Review Queue Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setShowReviewQueue(!showReviewQueue)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors ${
+                    showReviewQueue
+                      ? 'bg-brand-500/20 text-brand-300 border-brand-500/40 shadow-sm'
+                      : 'bg-surface-950 text-surface-400 border-surface-800 hover:text-white light:bg-surface-100 light:border-surface-200'
+                  }`}
+                  title="Toggle Review Queue & Triage Panel"
+                >
+                  <ListFilter className="h-3.5 w-3.5" />
+                  <span>Review Queue {reviewFlaggedCount > 0 ? `(${reviewFlaggedCount})` : ''}</span>
+                </button>
+
                 {/* Manual Save */}
                 <button
                   type="button"
@@ -1301,6 +1390,25 @@ export const Transcription: React.FC<TranscriptionProps> = ({
             )}
           </div>
 
+          {/* Collapsible Review Queue & Flagged Segments Triage */}
+          {reviewQueueItems.length > 0 && (
+            <ReviewQueuePanel
+              items={reviewQueueItems}
+              totalSegments={reviewTotalSegments}
+              flaggedCount={reviewFlaggedCount}
+              reviewedCount={reviewReviewedCount}
+              activeSegmentId={activeSegmentId}
+              onSelectSegment={handleQueueSelectSegment}
+              onOpenVerification={(segId) => {
+                const s = segments.find(seg => seg.id === segId);
+                if (s) handleOpenVerification(s);
+              }}
+              onMarkReviewed={handleMarkSegmentReviewed}
+              isOpen={showReviewQueue}
+              onClose={() => setShowReviewQueue(false)}
+            />
+          )}
+
           {/* Mode Notification Banner */}
           {reviewMode === 'original' && (
             <div className="p-3.5 rounded-xl bg-surface-950 border border-surface-800 text-xs text-surface-400 flex items-center justify-between light:bg-surface-100 light:border-surface-200">
@@ -1322,6 +1430,8 @@ export const Transcription: React.FC<TranscriptionProps> = ({
               const isLoopingThis = loopingSegmentId === seg.id;
               const isEdited = seg.text !== seg.original_text;
               const altState = alternativeMap[seg.id];
+              const reviewItem = reviewQueueItems.find(i => i.segment_id === seg.id);
+              const isReviewed = reviewItem?.review_status === 'human_reviewed';
 
               return (
                 <div
@@ -1384,29 +1494,53 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      {/* Alternative Suggestion Trigger */}
+                      {/* Intelligent Second-Pass Verification Button */}
                       {reviewMode === 'corrected' && (
                         <button
                           type="button"
-                          disabled={altState?.loading}
-                          onClick={() => handleRequestAlternative(seg, 'large-v3-turbo')}
-                          className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-surface-800 hover:bg-surface-700 text-surface-300 hover:text-white text-[11px] font-semibold transition-colors border border-surface-700/80 light:bg-surface-100 light:border-surface-200 light:text-surface-700"
-                          title="Query Large-v3-Turbo for an alternative candidate transcript of this segment"
+                          onClick={() => handleOpenVerification(seg)}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-brand-600/15 hover:bg-brand-600 text-brand-300 hover:text-white text-[11px] font-semibold transition-colors border border-brand-500/30"
+                          title="Open Intelligent Second-Pass Verification & Disagreement Modal"
                         >
-                          <Sparkles className={`h-3 w-3 text-brand-400 ${altState?.loading ? 'animate-spin' : ''}`} />
-                          <span>{altState?.loading ? 'Checking...' : 'Alternative Model'}</span>
+                          <Sparkles className="h-3 w-3 text-brand-400" />
+                          <span>Verify with AI</span>
                         </button>
                       )}
 
-                      {seg.uncertain && (
+                      {/* Quick Mark Reviewed Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => handleMarkSegmentReviewed(seg.id)}
+                        className={`p-1.5 rounded-xl border text-xs transition-colors ${
+                          isReviewed
+                            ? 'bg-emerald-500 text-white border-emerald-400'
+                            : 'bg-surface-800 text-surface-400 border-surface-700 hover:text-white'
+                        }`}
+                        title={isReviewed ? 'Unmark reviewed' : 'Mark segment as human reviewed'}
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                      </button>
+
+                      {/* Status Badges */}
+                      {isReviewed ? (
+                        <span className="flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-400 border border-emerald-500/20">
+                          <CheckCircle2 className="h-3 w-3" />
+                          <span>Reviewed</span>
+                        </span>
+                      ) : reviewItem?.alternatives_count && reviewItem.alternatives_count > 0 ? (
+                        <span className="flex items-center gap-1 rounded-md bg-purple-500/10 px-2 py-0.5 text-[11px] font-semibold text-purple-400 border border-purple-500/20">
+                          <Sparkles className="h-3 w-3" />
+                          <span>Alternative Ready ({reviewItem.alternatives_count})</span>
+                        </span>
+                      ) : (reviewItem?.is_flagged || seg.uncertain) ? (
                         <span
                           className="flex items-center gap-1 rounded-md bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-400 border border-amber-500/20"
-                          title={seg.uncertain_reason ? `Flagged: ${seg.uncertain_reason}` : 'Acoustically uncertain segment'}
+                          title={reviewItem?.flag_reasons?.join(', ') || seg.uncertain_reason || 'Review Suggested'}
                         >
                           <AlertTriangle className="h-3 w-3" />
-                          <span>Uncertain</span>
+                          <span>{reviewItem?.flag_label || 'Review Suggested'}</span>
                         </span>
-                      )}
+                      ) : null}
 
                       <span className="text-xs font-mono font-bold text-surface-500">#{seg.id}</span>
                     </div>
@@ -1516,6 +1650,20 @@ export const Transcription: React.FC<TranscriptionProps> = ({
             })}
           </div>
         </div>
+      )}
+
+      {/* Intelligent Audio-Grounded Second-Pass Verification Modal */}
+      {selectedVerificationSegment && activeJobId && (
+        <SegmentVerificationModal
+          isOpen={verificationModalOpen}
+          onClose={() => setVerificationModalOpen(false)}
+          jobId={activeJobId}
+          segment={selectedVerificationSegment}
+          currentText={selectedVerificationSegment.text}
+          onApplyText={handleApplyVerificationText}
+          onMarkReviewed={handleMarkSegmentReviewed}
+          onSeekAudio={(t) => playerRef.current?.seekTo(t)}
+        />
       )}
     </div>
   );

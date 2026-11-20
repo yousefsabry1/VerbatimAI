@@ -255,3 +255,26 @@ def test_results_endpoint_enforces_sample_identity(isolated_benchmark_env):
     assert "results" in data
     for r in data["results"]:
         assert r["sample_id"] == "holdout_300_345"
+
+
+def test_qwencleo_experimental_model_registration_and_safeguards(isolated_benchmark_env):
+    """
+    Verifies that QwenCleo 4-bit is registered as an experimental benchmark-only model,
+    auto-download is safely prevented, and it is recognized as locally ready.
+    """
+    # 1. Models catalog check
+    res = client.get("/api/models")
+    assert res.status_code == 200
+    models = res.json()["models"]
+    qwen = next((m for m in models if m["id"] == "qwencleo-asr-4bit"), None)
+    assert qwen is not None
+    assert qwen["is_experimental"] is True
+    assert qwen["benchmark_only"] is True
+    assert qwen["is_downloaded"] is True
+
+    # 2. Download endpoint must reject auto-download for experimental models
+    from app.transcription.engine import download_model
+    with pytest.raises(RuntimeError) as exc_info:
+        download_model("qwencleo-asr-4bit")
+    assert "auto-download is disabled" in str(exc_info.value).lower()
+

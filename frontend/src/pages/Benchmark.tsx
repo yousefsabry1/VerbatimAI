@@ -688,6 +688,11 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                       className="rounded border-surface-700 bg-surface-800 text-brand-500"
                     />
                     <span className="font-semibold">{m.name}</span>
+                    {m.is_experimental && (
+                      <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-bold text-amber-400 border border-amber-500/30">
+                        Experimental
+                      </span>
+                    )}
                   </div>
                   <span className="text-[10px] text-surface-500 font-mono">
                     {m.is_downloaded ? 'Ready' : 'Download Needed'}
