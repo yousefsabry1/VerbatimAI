@@ -518,8 +518,10 @@ def run_transcription_pipeline(
         target_lang = language
 
     # Inference settings with loop suppression & temperature fallback
-    beam_size = 5 if accuracy_mode == "maximum" else 4
+    beam_size = 5 if accuracy_mode in ("maximum", "recovery") else 4
     vad_parameters = dict(min_silence_duration_ms=500, speech_pad_ms=300) if vad_filter else None
+    condition_prev = False if accuracy_mode == "recovery" else True
+    hotwords_param = prompt if (vocabulary_hints and vocabulary_hints.strip()) else None
 
     if progress_callback:
         progress_callback(0.20, f"Transcribing speech with Faster-Whisper ({actual_device.upper()})...")
@@ -540,9 +542,10 @@ def run_transcription_pipeline(
         segments_gen, info = model.transcribe(
             str(inference_audio),
             language=target_lang,
-            initial_prompt=prompt,
+            initial_prompt=prompt if accuracy_mode != "recovery" else None,
+            hotwords=hotwords_param,
             beam_size=beam_size,
-            condition_on_previous_text=True,
+            condition_on_previous_text=condition_prev,
             vad_filter=vad_filter,
             vad_parameters=vad_parameters,
             no_speech_threshold=0.8,
@@ -737,9 +740,10 @@ def run_transcription_pipeline(
                 cpu_segments_gen, cpu_info = cpu_model.transcribe(
                     str(remaining_audio),
                     language=target_lang,
-                    initial_prompt=prompt,
+                    initial_prompt=prompt if accuracy_mode != "recovery" else None,
+                    hotwords=hotwords_param,
                     beam_size=beam_size,
-                    condition_on_previous_text=True,
+                    condition_on_previous_text=condition_prev,
                     vad_filter=vad_filter,
                     vad_parameters=vad_parameters,
                     no_speech_threshold=0.8,

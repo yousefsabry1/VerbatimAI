@@ -98,11 +98,16 @@ def get_job_reviews(job_id: str):
     reviews_map = get_segment_reviews(job_id)
     all_hyps = get_alternative_hypotheses(job_id)
 
-    # Run suspicious-region detector across segments
+    # Run suspicious-region detector across segments with speech coverage analysis
+    job_input_path = None
+    if job.get("input_path") and Path(job["input_path"]).exists():
+        job_input_path = Path(job["input_path"])
+
     diagnostics = detect_suspicious_segments(
         segments=segments,
         alternative_hypotheses=all_hyps,
         reviews_map=reviews_map,
+        audio_path=job_input_path,
     )
 
     # Merge into structured segment review catalog

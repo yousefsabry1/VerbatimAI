@@ -88,6 +88,9 @@ export const ReviewQueuePanel: React.FC<ReviewQueuePanelProps> = ({
   };
 
   const getReasonBadge = (reason: string) => {
+    if (reason.toLowerCase().includes('missing') || reason.toLowerCase().includes('sparse')) {
+      return { label: 'Possible Missing Speech', bg: 'bg-orange-500/10 text-orange-400 border-orange-500/30' };
+    }
     if (reason.toLowerCase().includes('repetition')) {
       return { label: 'Repetition Loop', bg: 'bg-rose-500/10 text-rose-400 border-rose-500/30' };
     }

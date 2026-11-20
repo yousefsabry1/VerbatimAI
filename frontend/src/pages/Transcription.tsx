@@ -78,7 +78,7 @@ export const Transcription: React.FC<TranscriptionProps> = ({
   const [selectedModel, setSelectedModel] = useState<string>('codeswitched-medium');
   const [language, setLanguage] = useState<string>('ar');
   const [verbatimMode, setVerbatimMode] = useState<'strict' | 'clean'>('strict');
-  const [accuracyMode, setAccuracyMode] = useState<'balanced' | 'maximum'>('maximum');
+  const [accuracyMode, setAccuracyMode] = useState<'balanced' | 'maximum' | 'recovery'>('maximum');
   const [enhanceAudio, setEnhanceAudio] = useState<boolean>(false);
   const [vadFilter, setVadFilter] = useState<boolean>(false); // False is recommended for Egyptian audio
   const [vocabularyHints, setVocabularyHints] = useState<string>('');
@@ -1053,6 +1053,7 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                   className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none"
                 >
                   <option value="maximum">Maximum Accuracy (Beam Size 5, High Context)</option>
+                  <option value="recovery">Accuracy Recovery (Boundary De-duplication & Technical Boosting)</option>
                   <option value="balanced">Balanced (Fast, Beam Size 3)</option>
                 </select>
               </div>

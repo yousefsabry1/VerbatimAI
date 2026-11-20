@@ -109,6 +109,19 @@ def analyze_segment_for_review(
     if review_status and "manually_flagged" in review_status.get("flag_reasons", []):
         flag_reasons.append("manually_flagged")
 
+    # Signal 8: Speech coverage anomaly / Possible Missing Speech
+    seg_s = float(segment.get("start", 0.0))
+    seg_e = float(segment.get("end", 0.0))
+    seg_dur = seg_e - seg_s
+    word_count = len(text.split())
+    if seg_dur >= 4.0 and (word_count / max(0.5, seg_dur)) < 0.75 and word_count > 0:
+        flag_reasons.append("possible_missing_speech")
+        signals["sparse_word_density"] = {
+            "duration": round(seg_dur, 2),
+            "words": word_count,
+            "words_per_sec": round(word_count / max(0.5, seg_dur), 2),
+        }
+
     # Determine priority label and severity
     is_flagged = len(flag_reasons) > 0
     flag_label = "Verified" if not is_flagged else "Review Suggested"
@@ -116,6 +129,9 @@ def analyze_segment_for_review(
 
     if "model_disagreement" in flag_reasons:
         flag_label = "Model Disagreement"
+        severity = "high"
+    elif "possible_missing_speech" in flag_reasons:
+        flag_label = "Possible Missing Speech"
         severity = "high"
     elif "repetition_suspected" in flag_reasons:
         flag_label = "Repetition Suspected"
@@ -147,17 +163,31 @@ def detect_suspicious_segments(
     segments: List[Dict[str, Any]],
     alternative_hypotheses: Optional[List[Dict[str, Any]]] = None,
     reviews_map: Optional[Dict[int, Dict[str, Any]]] = None,
+    audio_path: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     Runs suspicious-region detection across all segments in a transcript.
     Returns list of segment diagnostic objects.
     """
+    from app.audio.coverage_detector import detect_speech_coverage_gaps
+
     alt_map: Dict[int, Dict[str, Any]] = {}
     if alternative_hypotheses:
         for alt in alternative_hypotheses:
             s_id = alt.get("segment_id")
             if s_id is not None:
                 alt_map[s_id] = alt
+
+    # Detect coverage gaps if audio_path exists
+    coverage_issues = []
+    if audio_path:
+        try:
+            from pathlib import Path
+            p = Path(audio_path) if not isinstance(audio_path, Path) else audio_path
+            if p.exists():
+                coverage_issues = detect_speech_coverage_gaps(p, segments)
+        except Exception:
+            coverage_issues = []
 
     results = []
     prev_seg = None
@@ -172,6 +202,19 @@ def detect_suspicious_segments(
             alternative_hypothesis=alt,
             review_status=rev,
         )
+
+        for cov in coverage_issues:
+            if cov.get("segment_id") == s_id or (
+                float(s.get("start", 0)) <= cov.get("end", 0)
+                and float(s.get("end", 0)) >= cov.get("start", 0)
+            ):
+                if "possible_missing_speech" not in diag["flag_reasons"]:
+                    diag["flag_reasons"].append("possible_missing_speech")
+                    diag["is_flagged"] = True
+                    diag["flag_label"] = "Possible Missing Speech"
+                    diag["severity"] = "high"
+                diag["signals"]["coverage_issue"] = cov
+
         results.append(diag)
         prev_seg = s
 

@@ -30,7 +30,7 @@ class TranscriptionRequest(BaseModel):
     language: Optional[str] = None
     device_mode: str = "auto"
     compute_mode: str = "auto"
-    accuracy_mode: str = "balanced"  # "balanced" or "maximum"
+    accuracy_mode: str = "balanced"  # "balanced", "maximum", or "recovery"
     verbatim_mode: str = "strict"    # "strict" or "clean"
     enhance_audio: bool = False
     vad_filter: bool = True
