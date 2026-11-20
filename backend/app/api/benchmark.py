@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import hashlib
 import subprocess
 import mimetypes
 from pathlib import Path
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/api/benchmark", tags=["benchmark"])
 BENCHMARK_DIR = STORAGE_DIR / "benchmarks"
 BENCHMARK_DIR.mkdir(parents=True, exist_ok=True)
 
-# Sample Files
+# Sample Storage Paths
 DEV_REF_FILE = BENCHMARK_DIR / "human_reference_raw.txt"
 DEV_AUDIO_FILE = BENCHMARK_DIR / "ref_103s.wav"
 DEV_RESULTS_FILE = BENCHMARK_DIR / "benchmark_results.json"
@@ -40,10 +41,16 @@ HOLDOUT_META_FILE = BENCHMARK_DIR / "benchmark_meta_holdout_300_345.json"
 class ReferenceUpdateRequest(BaseModel):
     sample_id: str = "dev_0_103"
     reference_text: str
-    start_time: float = 0.0
-    end_time: float = 103.5
+    action: Optional[str] = "save_draft"  # "save_draft" or "save_and_verify"
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
     is_human_verified: bool = False
     verification_statement: Optional[str] = None
+
+
+class CalculateAccuracyRequest(BaseModel):
+    sample_id: str
+    eval_mode: str = "normalized"  # "normalized" or "raw"
 
 
 class BenchmarkRunRequest(BaseModel):
@@ -57,6 +64,7 @@ class BenchmarkRunRequest(BaseModel):
     custom_hints: Optional[str] = None
     eval_mode: str = "normalized"  # "normalized" or "raw"
     vad_filter: bool = False
+    audio_filter: Optional[str] = "none"  # "none" or "highpass_gain"
 
 
 class LiveAlignRequest(BaseModel):
@@ -70,10 +78,26 @@ def _find_source_audio() -> Path:
         Path("dd.ogg"),
         Path("../dd.ogg"),
         Path("A:/Projects For Antigravity IDE/General Ideas/1. Transcript voices/dd.ogg"),
+        BENCHMARK_DIR / "dd.ogg",
     ]:
         if candidate.exists():
             return candidate.resolve()
     raise FileNotFoundError("Workspace recording dd.ogg not found.")
+
+
+def _ensure_dev_slice():
+    """Ensures ref_103s.wav (00:00-01:43.5) is extracted from dd.ogg."""
+    if not DEV_AUDIO_FILE.exists():
+        src = _find_source_audio()
+        ffmpeg = find_ffmpeg()
+        cmd = [
+            ffmpeg, "-y",
+            "-t", "103.5",
+            "-i", str(src),
+            "-vn", "-ac", "1", "-ar", "16000",
+            str(DEV_AUDIO_FILE),
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
 
 def _ensure_test_slice():
@@ -108,114 +132,98 @@ def _ensure_holdout_slice():
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
 
-def _ensure_dev_slice():
-    """Ensures ref_103s.wav (00:00-01:43.5) is extracted from dd.ogg."""
-    if not DEV_AUDIO_FILE.exists():
-        src = _find_source_audio()
-        ffmpeg = find_ffmpeg()
-        cmd = [
-            ffmpeg, "-y",
-            "-t", "103.5",
-            "-i", str(src),
-            "-vn", "-ac", "1", "-ar", "16000",
-            str(DEV_AUDIO_FILE),
-        ]
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "dev_0_103": {
+        "sample_id": "dev_0_103",
+        "name": "Development Sample (00:00 - 01:43)",
+        "start_time": 0.0,
+        "end_time": 103.5,
+        "duration": 103.5,
+        "ref_file": DEV_REF_FILE,
+        "audio_file": DEV_AUDIO_FILE,
+        "results_file": DEV_RESULTS_FILE,
+        "meta_file": DEV_META_FILE,
+        "ensure_fn": _ensure_dev_slice,
+        "default_verified": True,
+        "description": "Original human ground-truth transcript provided by the user. Baseline: 52.71% Normalized WER.",
+    },
+    "test_180_225": {
+        "sample_id": "test_180_225",
+        "name": "Independent Test Sample (03:00 - 03:45)",
+        "start_time": 180.0,
+        "end_time": 225.0,
+        "duration": 45.0,
+        "ref_file": TEST_REF_FILE,
+        "audio_file": TEST_AUDIO_FILE,
+        "results_file": TEST_RESULTS_FILE,
+        "meta_file": TEST_META_FILE,
+        "ensure_fn": _ensure_test_slice,
+        "default_verified": True,
+        "description": "Independent 45s out-of-sample audio interval. Personally transcribed by the user from original audio.",
+    },
+    "holdout_300_345": {
+        "sample_id": "holdout_300_345",
+        "name": "Unseen Holdout Sample (05:00 - 05:45)",
+        "start_time": 300.0,
+        "end_time": 345.0,
+        "duration": 45.0,
+        "ref_file": HOLDOUT_REF_FILE,
+        "audio_file": HOLDOUT_AUDIO_FILE,
+        "results_file": HOLDOUT_RESULTS_FILE,
+        "meta_file": HOLDOUT_META_FILE,
+        "ensure_fn": _ensure_holdout_slice,
+        "default_verified": False,
+        "description": "Strict unseen out-of-sample holdout audio interval (05:00 - 05:45). Reference manually transcribed by user.",
+    },
+}
 
 
 @router.get("/samples")
 def get_benchmark_samples():
     """
-    Returns the catalog of registered benchmark evaluation intervals.
+    Returns the catalog of registered benchmark evaluation intervals with their canonical metadata.
     """
-    _ensure_dev_slice()
-    _ensure_test_slice()
-    _ensure_holdout_slice()
+    catalog = []
+    for s_id, cfg in SAMPLE_CONFIGS.items():
+        cfg["ensure_fn"]()
+        raw_text = ""
+        if cfg["ref_file"].exists():
+            raw_text = cfg["ref_file"].read_text(encoding="utf-8").strip()
+        word_count = len(raw_text.split())
 
-    dev_words = 0
-    if DEV_REF_FILE.exists():
-        dev_words = len(DEV_REF_FILE.read_text(encoding="utf-8").strip().split())
-
-    test_words = 0
-    test_verified = False
-    if TEST_REF_FILE.exists():
-        test_txt = TEST_REF_FILE.read_text(encoding="utf-8").strip()
-        test_words = len(test_txt.split())
-        if TEST_META_FILE.exists():
+        is_verified = False
+        if cfg["meta_file"].exists():
             try:
-                m = json.loads(TEST_META_FILE.read_text(encoding="utf-8"))
-                test_verified = m.get("is_human_verified", False) and test_words > 0
+                m = json.loads(cfg["meta_file"].read_text(encoding="utf-8"))
+                is_verified = bool(m.get("is_human_verified", False) and word_count > 0)
             except Exception:
-                test_verified = False
+                is_verified = False
+        else:
+            is_verified = bool(cfg["default_verified"] and word_count > 0)
 
-    holdout_words = 0
-    holdout_verified = False
-    if HOLDOUT_REF_FILE.exists():
-        holdout_txt = HOLDOUT_REF_FILE.read_text(encoding="utf-8").strip()
-        holdout_words = len(holdout_txt.split())
-        if HOLDOUT_META_FILE.exists():
-            try:
-                m = json.loads(HOLDOUT_META_FILE.read_text(encoding="utf-8"))
-                holdout_verified = m.get("is_human_verified", False) and holdout_words > 0
-            except Exception:
-                holdout_verified = False
+        badge = (
+            f"Verified Human Reference ({word_count} words)"
+            if is_verified
+            else (f"Draft Saved ({word_count} words) — Unverified" if word_count > 0 else "UNVERIFIED — Pending Human Transcription")
+        )
+
+        catalog.append({
+            "sample_id": s_id,
+            "name": cfg["name"],
+            "start_time": cfg["start_time"],
+            "end_time": cfg["end_time"],
+            "duration": cfg["duration"],
+            "audio_url": f"/api/benchmark/audio/{s_id}",
+            "status": "VERIFIED" if is_verified else "UNVERIFIED",
+            "verification_badge": badge,
+            "has_human_reference": word_count > 0,
+            "is_human_verified": is_verified,
+            "word_count": word_count,
+            "description": cfg["description"],
+        })
 
     return {
-        "samples": [
-            {
-                "sample_id": "dev_0_103",
-                "name": "Development Sample (00:00 - 01:43)",
-                "start_time": 0.0,
-                "end_time": 103.5,
-                "duration": 103.5,
-                "audio_url": "/api/benchmark/audio/dev_0_103",
-                "status": "VERIFIED",
-                "verification_badge": f"Verified Human Reference ({dev_words} words)",
-                "has_human_reference": True,
-                "word_count": dev_words,
-                "description": "Original human-verified ground-truth sample. Development baseline: 52.71% Normalized WER.",
-            },
-            {
-                "sample_id": "test_180_225",
-                "name": "Independent Test Sample (03:00 - 03:45)",
-                "start_time": 180.0,
-                "end_time": 225.0,
-                "duration": 45.0,
-                "audio_url": "/api/benchmark/audio/test_180_225",
-                "status": "VERIFIED" if test_verified else "UNVERIFIED",
-                "verification_badge": (
-                    f"Verified Human Reference ({test_words} words)"
-                    if test_verified
-                    else "UNVERIFIED — No valid WER/CER available"
-                ),
-                "has_human_reference": test_verified,
-                "word_count": test_words,
-                "description": (
-                    "Independent 45s out-of-sample audio interval. "
-                    + ("Human reference verified." if test_verified else "Requires manual human verification against audio.")
-                ),
-            },
-            {
-                "sample_id": "holdout_300_345",
-                "name": "Genuinely New Holdout Test Sample (05:00 - 05:45)",
-                "start_time": 300.0,
-                "end_time": 345.0,
-                "duration": 45.0,
-                "audio_url": "/api/benchmark/audio/holdout_300_345",
-                "status": "VERIFIED" if holdout_verified else "UNVERIFIED",
-                "verification_badge": (
-                    f"Verified Human Reference ({holdout_words} words)"
-                    if holdout_verified
-                    else "UNVERIFIED — Pending Human Transcription"
-                ),
-                "has_human_reference": holdout_verified,
-                "word_count": holdout_words,
-                "description": (
-                    "Strict unseen out-of-sample holdout audio interval (05:00 - 05:45). "
-                    + ("Human reference verified." if holdout_verified else "Reference left strictly blank for manual human transcription.")
-                ),
-            },
-        ],
+        "samples": catalog,
         "audit_notice": {
             "invalidated_slice": "04:05 - 04:55 (245s - 295s)",
             "reason": "Retracted due to circular AI pseudo-ground-truth generation. 30.22% WER invalidated.",
@@ -229,20 +237,13 @@ def stream_benchmark_audio(sample_id: str):
     """
     Streams audio for the requested benchmark sample with byte-range support.
     """
-    _ensure_dev_slice()
-    _ensure_test_slice()
-    _ensure_holdout_slice()
-
-    if sample_id == "dev_0_103":
-        target = DEV_AUDIO_FILE
-    elif sample_id == "test_180_225":
-        target = TEST_AUDIO_FILE
-    elif sample_id == "holdout_300_345":
-        target = HOLDOUT_AUDIO_FILE
+    if sample_id in SAMPLE_CONFIGS:
+        cfg = SAMPLE_CONFIGS[sample_id]
+        cfg["ensure_fn"]()
+        target = cfg["audio_file"]
     elif sample_id == "full":
         target = _find_source_audio()
     else:
-        # Check direct filename in benchmark dir
         p = BENCHMARK_DIR / sample_id
         if p.is_file():
             target = p
@@ -261,189 +262,334 @@ def stream_benchmark_audio(sample_id: str):
 @router.get("/reference")
 def get_reference(sample_id: str = Query("dev_0_103")):
     """
-    Retrieves the reference transcript and verification status for a benchmark sample.
+    Retrieves the reference transcript, revision hash, and verification metadata for a benchmark sample.
     """
-    if sample_id == "holdout_300_345":
-        if not HOLDOUT_REF_FILE.exists():
-            return {
-                "sample_id": "holdout_300_345",
-                "has_reference": False,
-                "is_human_verified": False,
-                "verification_status": "UNVERIFIED — Pending Human Transcription",
-                "raw_text": "",
-                "normalized_text": "",
-                "start_time": 300.0,
-                "end_time": 345.0,
-                "word_count_raw": 0,
-                "word_count_norm": 0,
-            }
-        raw_text = HOLDOUT_REF_FILE.read_text(encoding="utf-8").strip()
-        norm_text = normalize_arabic_english(raw_text)
-        is_verified = False
-        if HOLDOUT_META_FILE.exists():
-            try:
-                m = json.loads(HOLDOUT_META_FILE.read_text(encoding="utf-8"))
-                is_verified = m.get("is_human_verified", False) and len(raw_text.split()) > 0
-            except Exception:
-                is_verified = False
+    if sample_id not in SAMPLE_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Unknown sample ID '{sample_id}'.")
 
-        return {
-            "sample_id": "holdout_300_345",
-            "has_reference": is_verified,
-            "is_human_verified": is_verified,
-            "verification_status": "VERIFIED" if is_verified else "UNVERIFIED — Pending Human Transcription",
-            "raw_text": raw_text,
-            "normalized_text": norm_text,
-            "start_time": 300.0,
-            "end_time": 345.0,
-            "word_count_raw": len(raw_text.split()),
-            "word_count_norm": len(norm_text.split()),
-        }
+    cfg = SAMPLE_CONFIGS[sample_id]
+    cfg["ensure_fn"]()
 
-    if sample_id == "test_180_225":
-        if not TEST_REF_FILE.exists():
-            return {
-                "sample_id": "test_180_225",
-                "has_reference": False,
-                "is_human_verified": False,
-                "verification_status": "UNVERIFIED — No valid WER/CER available",
-                "raw_text": "",
-                "normalized_text": "",
-                "start_time": 180.0,
-                "end_time": 225.0,
-                "word_count_raw": 0,
-                "word_count_norm": 0,
-            }
-        raw_text = TEST_REF_FILE.read_text(encoding="utf-8").strip()
-        norm_text = normalize_arabic_english(raw_text)
-        is_verified = False
-        if TEST_META_FILE.exists():
-            try:
-                m = json.loads(TEST_META_FILE.read_text(encoding="utf-8"))
-                is_verified = m.get("is_human_verified", False) and len(raw_text.split()) > 0
-            except Exception:
-                is_verified = False
+    raw_text = ""
+    if cfg["ref_file"].exists():
+        raw_text = cfg["ref_file"].read_text(encoding="utf-8").strip()
 
-        return {
-            "sample_id": "test_180_225",
-            "has_reference": is_verified,
-            "is_human_verified": is_verified,
-            "verification_status": "VERIFIED" if is_verified else "UNVERIFIED — No valid WER/CER available",
-            "raw_text": raw_text,
-            "normalized_text": norm_text,
-            "start_time": 180.0,
-            "end_time": 225.0,
-            "word_count_raw": len(raw_text.split()),
-            "word_count_norm": len(norm_text.split()),
-        }
+    word_count_raw = len(raw_text.split())
+    norm_text = normalize_arabic_english(raw_text) if raw_text else ""
+    word_count_norm = len(norm_text.split()) if norm_text else 0
 
-    # Default to dev_0_103
-    if not DEV_REF_FILE.exists():
-        return {
-            "sample_id": "dev_0_103",
-            "has_reference": False,
-            "is_human_verified": False,
-            "verification_status": "UNVERIFIED — No valid WER/CER available",
-            "raw_text": "",
-            "normalized_text": "",
-            "start_time": 0.0,
-            "end_time": 103.5,
-        }
+    meta: Dict[str, Any] = {}
+    if cfg["meta_file"].exists():
+        try:
+            meta = json.loads(cfg["meta_file"].read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
 
-    raw_text = DEV_REF_FILE.read_text(encoding="utf-8").strip()
-    norm_text = normalize_arabic_english(raw_text)
+    is_verified = False
+    if "is_human_verified" in meta:
+        is_verified = bool(meta.get("is_human_verified", False) and word_count_raw > 0)
+    else:
+        is_verified = bool(cfg["default_verified"] and word_count_raw > 0)
+
+    if word_count_raw == 0:
+        v_status = "NO_REFERENCE"
+        v_badge = "UNVERIFIED — Pending Human Transcription"
+    elif is_verified:
+        v_status = "HUMAN_VERIFIED"
+        v_badge = f"Verified Human Reference ({word_count_raw} words)"
+    else:
+        v_status = "DRAFT"
+        v_badge = f"Draft Saved ({word_count_raw} words) — Unverified"
+
+    rev_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:12] if raw_text else ""
 
     return {
-        "sample_id": "dev_0_103",
-        "has_reference": True,
-        "is_human_verified": True,
-        "verification_status": "VERIFIED",
+        "sample_id": sample_id,
+        "sample_name": cfg["name"],
+        "has_reference": word_count_raw > 0,
+        "is_human_verified": is_verified,
+        "verification_status": v_status,
+        "verification_badge": v_badge,
+        "verification_statement": meta.get("verification_statement"),
+        "verification_timestamp": meta.get("verification_timestamp"),
+        "verification_method": meta.get("verification_method"),
+        "reference_revision": rev_hash,
         "raw_text": raw_text,
         "normalized_text": norm_text,
-        "start_time": 0.0,
-        "end_time": 103.5,
-        "word_count_raw": len(raw_text.split()),
-        "word_count_norm": len(norm_text.split()),
+        "start_time": cfg["start_time"],
+        "end_time": cfg["end_time"],
+        "duration": cfg["duration"],
+        "word_count_raw": word_count_raw,
+        "word_count_norm": word_count_norm,
+        "updated_at": meta.get("updated_at"),
     }
 
 
 @router.post("/reference")
 def save_reference(req: ReferenceUpdateRequest):
     """
-    Saves a reference transcript. Enforces explicit certification before marking as human-verified.
+    Saves a reference transcript. Supports saving as unverified draft or certifying as human-verified.
     """
+    if req.sample_id not in SAMPLE_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Unknown sample ID '{req.sample_id}'.")
+
+    cfg = SAMPLE_CONFIGS[req.sample_id]
     cleaned_text = req.reference_text.strip()
+    if not cleaned_text:
+        raise HTTPException(status_code=400, detail="Reference text cannot be empty.")
 
-    if req.sample_id == "holdout_300_345":
-        HOLDOUT_REF_FILE.write_text(cleaned_text, encoding="utf-8")
-        meta = {
-            "sample_id": "holdout_300_345",
-            "start_time": 300.0,
-            "end_time": 345.0,
-            "is_human_verified": bool(req.is_human_verified and len(cleaned_text.split()) > 0),
-            "verification_statement": req.verification_statement or "Human user verified against audio recording.",
-            "updated_at": time.time(),
-            "word_count": len(cleaned_text.split()),
-        }
-        HOLDOUT_META_FILE.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        return {
-            "status": "success",
-            "sample_id": "holdout_300_345",
-            "is_human_verified": meta["is_human_verified"],
-            "message": "Holdout reference saved successfully." + (" Certified as human verified." if meta["is_human_verified"] else " Saved as draft (unverified)."),
-        }
+    is_certifying = req.action == "save_and_verify" or req.is_human_verified
 
-    if req.sample_id == "test_180_225":
-        TEST_REF_FILE.write_text(cleaned_text, encoding="utf-8")
-        meta = {
-            "sample_id": "test_180_225",
-            "start_time": 180.0,
-            "end_time": 225.0,
-            "is_human_verified": bool(req.is_human_verified and len(cleaned_text.split()) > 0),
-            "verification_statement": req.verification_statement or "Human user verified against audio recording.",
-            "updated_at": time.time(),
-            "word_count": len(cleaned_text.split()),
-        }
-        TEST_META_FILE.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        return {
-            "status": "success",
-            "sample_id": "test_180_225",
-            "is_human_verified": meta["is_human_verified"],
-            "message": "Test reference saved successfully." + (" Certified as human verified." if meta["is_human_verified"] else " Saved as draft (unverified)."),
-        }
+    if is_certifying:
+        if not req.is_human_verified:
+            raise HTTPException(
+                status_code=400,
+                detail="Integrity Safeguard: You must certify that you personally listened to the audio and manually verified this transcript before certifying."
+            )
+        is_verified = True
+        v_status = "HUMAN_VERIFIED"
+        v_method = "explicit_human_certification"
+        v_stmt = req.verification_statement or "I confirm that I personally listened to the original audio and manually verified this transcript against what was actually spoken."
+        v_time = time.time()
+        msg = "Human reference verified successfully. Accuracy evaluation is now available."
+    else:
+        is_verified = False
+        v_status = "DRAFT"
+        v_method = None
+        v_stmt = None
+        v_time = None
+        msg = "Reference draft saved successfully. Verification is still required before accuracy metrics can be calculated."
 
-    # Default dev_0_103
-    DEV_REF_FILE.write_text(cleaned_text, encoding="utf-8")
-    DEV_META_FILE.write_text(json.dumps({
-        "sample_id": "dev_0_103",
-        "start_time": req.start_time,
-        "end_time": req.end_time,
-        "is_human_verified": True,
+    # Write raw reference file
+    cfg["ref_file"].write_text(cleaned_text, encoding="utf-8")
+    rev_hash = hashlib.sha256(cleaned_text.encode("utf-8")).hexdigest()[:12]
+
+    # Load existing meta to preserve audit history
+    prev_meta = {}
+    if cfg["meta_file"].exists():
+        try:
+            prev_meta = json.loads(cfg["meta_file"].read_text(encoding="utf-8"))
+        except Exception:
+            prev_meta = {}
+
+    revisions = prev_meta.get("revisions", [])
+    if prev_meta.get("reference_revision") and prev_meta.get("reference_revision") != rev_hash:
+        revisions.append({
+            "revision": prev_meta.get("reference_revision"),
+            "is_human_verified": prev_meta.get("is_human_verified", False),
+            "updated_at": prev_meta.get("updated_at"),
+            "word_count": prev_meta.get("word_count", 0),
+        })
+
+    meta = {
+        "sample_id": req.sample_id,
+        "reference_revision": rev_hash,
+        "start_time": cfg["start_time"],
+        "end_time": cfg["end_time"],
+        "duration": cfg["duration"],
+        "is_human_verified": is_verified,
+        "verification_status": v_status,
+        "verification_statement": v_stmt,
+        "verification_method": v_method,
+        "verification_timestamp": v_time,
         "updated_at": time.time(),
-    }, indent=2), encoding="utf-8")
+        "word_count": len(cleaned_text.split()),
+        "revisions": revisions[-10:],
+    }
+    cfg["meta_file"].write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    return {"status": "success", "sample_id": "dev_0_103", "is_human_verified": True, "message": "Development reference saved successfully"}
+    # Invalidate or auto-evaluate cached predictions in results_file
+    if cfg["results_file"].exists():
+        try:
+            runs = json.loads(cfg["results_file"].read_text(encoding="utf-8"))
+            if not is_verified:
+                # Mark all existing metrics as unverified draft
+                for r in runs:
+                    r["is_verified"] = False
+                    r["verification_notice"] = "UNVERIFIED — Reference is currently an unverified draft"
+                    r["norm_wer"] = None
+                    r["norm_cer"] = None
+                    r["raw_wer"] = None
+                    r["raw_cer"] = None
+                    r["norm_sub"] = None
+                    r["norm_del"] = None
+                    r["norm_ins"] = None
+                    r["norm_hits"] = None
+                cfg["results_file"].write_text(json.dumps(runs, indent=2, ensure_ascii=False), encoding="utf-8")
+            else:
+                # Certified human reference: calculate WER/CER for existing valid predictions
+                updated = False
+                for r in runs:
+                    if r.get("status") == "success" and r.get("predicted_text"):
+                        pred_text = r["predicted_text"]
+                        eval_norm = calculate_wer_cer(cleaned_text, pred_text, mode="normalized")
+                        eval_raw = calculate_wer_cer(cleaned_text, pred_text, mode="raw")
+                        r["sample_id"] = req.sample_id
+                        r["sample_name"] = cfg["name"]
+                        r["is_verified"] = True
+                        r["verification_notice"] = "Verified Human Reference Benchmark"
+                        r["norm_wer"] = eval_norm["wer_percent"]
+                        r["norm_cer"] = eval_norm["cer_percent"]
+                        r["norm_sub"] = eval_norm["substitutions"]
+                        r["norm_del"] = eval_norm["deletions"]
+                        r["norm_ins"] = eval_norm["insertions"]
+                        r["norm_hits"] = eval_norm["hits"]
+                        r["raw_wer"] = eval_raw["wer_percent"]
+                        r["raw_cer"] = eval_raw["cer_percent"]
+                        r["raw_sub"] = eval_raw["substitutions"]
+                        r["raw_del"] = eval_raw["deletions"]
+                        r["raw_ins"] = eval_raw["insertions"]
+                        r["word_alignment"] = eval_norm["word_alignment"]
+                        r["reference_revision"] = rev_hash
+                        r["evaluated_at"] = time.time()
+                        updated = True
+                if updated:
+                    cfg["results_file"].write_text(json.dumps(runs, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    return {
+        "status": "success",
+        "sample_id": req.sample_id,
+        "sample_name": cfg["name"],
+        "is_human_verified": is_verified,
+        "verification_status": v_status,
+        "word_count": len(cleaned_text.split()),
+        "reference_revision": rev_hash,
+        "message": msg,
+    }
+
+
+@router.post("/calculate-accuracy")
+def calculate_benchmark_accuracy(req: CalculateAccuracyRequest):
+    """
+    Evaluates existing candidate model predictions against the certified human reference without re-running models.
+    """
+    if req.sample_id not in SAMPLE_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Unknown sample ID '{req.sample_id}'.")
+
+    cfg = SAMPLE_CONFIGS[req.sample_id]
+    if not cfg["ref_file"].exists():
+        raise HTTPException(status_code=400, detail="Cannot calculate accuracy: No reference text found.")
+
+    human_ref = cfg["ref_file"].read_text(encoding="utf-8").strip()
+    if not human_ref:
+        raise HTTPException(status_code=400, detail="Cannot calculate accuracy: Reference text is empty.")
+
+    meta = {}
+    if cfg["meta_file"].exists():
+        try:
+            meta = json.loads(cfg["meta_file"].read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+
+    is_verified = bool(meta.get("is_human_verified", False) or (cfg["default_verified"] and len(human_ref.split()) > 0))
+    if not is_verified:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot calculate accuracy: Human reference is marked as DRAFT. Please certify the reference as manually verified first."
+        )
+
+    if not cfg["results_file"].exists():
+        raise HTTPException(status_code=400, detail="No candidate predictions found for this sample. Please run candidate models first.")
+
+    try:
+        runs = json.loads(cfg["results_file"].read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load candidate predictions: {e}")
+
+    rev_hash = hashlib.sha256(human_ref.encode("utf-8")).hexdigest()[:12]
+    eval_mode = req.eval_mode if req.eval_mode in ("normalized", "raw") else "normalized"
+
+    evaluated_count = 0
+    for r in runs:
+        if r.get("status") == "success" and r.get("predicted_text"):
+            pred_text = r["predicted_text"]
+            eval_norm = calculate_wer_cer(human_ref, pred_text, mode="normalized")
+            eval_raw = calculate_wer_cer(human_ref, pred_text, mode="raw")
+            r["sample_id"] = req.sample_id
+            r["sample_name"] = cfg["name"]
+            r["is_verified"] = True
+            r["verification_notice"] = "Verified Human Reference Benchmark"
+            r["norm_wer"] = eval_norm["wer_percent"]
+            r["norm_cer"] = eval_norm["cer_percent"]
+            r["norm_sub"] = eval_norm["substitutions"]
+            r["norm_del"] = eval_norm["deletions"]
+            r["norm_ins"] = eval_norm["insertions"]
+            r["norm_hits"] = eval_norm["hits"]
+            r["raw_wer"] = eval_raw["wer_percent"]
+            r["raw_cer"] = eval_raw["cer_percent"]
+            r["raw_sub"] = eval_raw["substitutions"]
+            r["raw_del"] = eval_raw["deletions"]
+            r["raw_ins"] = eval_raw["insertions"]
+            r["word_alignment"] = eval_norm["word_alignment"] if eval_mode == "normalized" else eval_raw["word_alignment"]
+            r["reference_revision"] = rev_hash
+            r["evaluated_at"] = time.time()
+            evaluated_count += 1
+
+    cfg["results_file"].write_text(json.dumps(runs, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return {
+        "status": "success",
+        "sample_id": req.sample_id,
+        "sample_name": cfg["name"],
+        "is_human_verified": True,
+        "eval_mode": eval_mode,
+        "evaluated_models": evaluated_count,
+        "results": runs,
+    }
 
 
 @router.get("/results")
 def get_latest_results(sample_id: str = Query("dev_0_103")):
     """
-    Returns latest benchmark results for the requested sample.
+    Returns latest benchmark results for the requested sample with verified sample identity.
     """
-    if sample_id == "holdout_300_345":
-        target_results_file = HOLDOUT_RESULTS_FILE
-    elif sample_id == "test_180_225":
-        target_results_file = TEST_RESULTS_FILE
-    else:
-        target_results_file = DEV_RESULTS_FILE
+    if sample_id not in SAMPLE_CONFIGS:
+        sample_id = "dev_0_103"
+
+    cfg = SAMPLE_CONFIGS[sample_id]
+    target_results_file = cfg["results_file"]
+
+    is_verified = cfg["default_verified"]
+    if cfg["meta_file"].exists():
+        try:
+            m = json.loads(cfg["meta_file"].read_text(encoding="utf-8"))
+            is_verified = bool(m.get("is_human_verified", False))
+        except Exception:
+            pass
 
     if not target_results_file.exists():
-        return {"has_results": False, "sample_id": sample_id, "results": []}
+        return {
+            "has_results": False,
+            "sample_id": sample_id,
+            "sample_name": cfg["name"],
+            "is_human_verified": is_verified,
+            "results": [],
+        }
+
     try:
         data = json.loads(target_results_file.read_text(encoding="utf-8"))
-        return {"has_results": True, "sample_id": sample_id, "results": data}
+        # Enforce canonical sample identity on all result objects
+        for item in data:
+            item["sample_id"] = sample_id
+            item["sample_name"] = cfg["name"]
+        return {
+            "has_results": True,
+            "sample_id": sample_id,
+            "sample_name": cfg["name"],
+            "is_human_verified": is_verified,
+            "results": data,
+        }
     except Exception as e:
-        return {"has_results": False, "error": str(e), "sample_id": sample_id, "results": []}
+        return {
+            "has_results": False,
+            "error": str(e),
+            "sample_id": sample_id,
+            "sample_name": cfg["name"],
+            "is_human_verified": is_verified,
+            "results": [],
+        }
 
 
 @router.post("/run")
@@ -452,65 +598,52 @@ def run_benchmark(req: BenchmarkRunRequest):
     Executes benchmark comparison on requested models.
     If reference is unverified, transcribes for review without reporting fabricated accuracy metrics.
     """
-    _ensure_dev_slice()
-    _ensure_test_slice()
-    _ensure_holdout_slice()
-
-    is_holdout_sample = (req.sample_id == "holdout_300_345") or (abs(req.start_time - 300.0) < 1.0 and abs(req.end_time - 345.0) < 1.0)
-    is_test_sample = (req.sample_id == "test_180_225") or (abs(req.start_time - 180.0) < 1.0 and abs(req.end_time - 225.0) < 1.0)
-
-    if is_holdout_sample:
+    if req.sample_id in SAMPLE_CONFIGS:
+        current_sample_id = req.sample_id
+    elif abs(req.start_time - 300.0) < 1.0:
         current_sample_id = "holdout_300_345"
-    elif is_test_sample:
+    elif abs(req.start_time - 180.0) < 1.0:
         current_sample_id = "test_180_225"
     else:
         current_sample_id = "dev_0_103"
 
+    cfg = SAMPLE_CONFIGS[current_sample_id]
+    cfg["ensure_fn"]()
+
     ref_data = get_reference(current_sample_id)
     has_valid_human_ref = ref_data.get("is_human_verified", False) and ref_data.get("word_count_raw", 0) > 0
     human_ref = ref_data.get("raw_text", "")
+    rev_hash = ref_data.get("reference_revision", "")
 
-    # Select audio slice
-    if is_holdout_sample:
-        sliced_audio = HOLDOUT_AUDIO_FILE
-        duration = 45.0
-        start_t = 300.0
-        end_t = 345.0
-    elif is_test_sample:
-        sliced_audio = TEST_AUDIO_FILE
-        duration = 45.0
-        start_t = 180.0
-        end_t = 225.0
-    elif abs(req.start_time - 0.0) < 0.5 and abs(req.end_time - 103.5) < 1.0:
-        sliced_audio = DEV_AUDIO_FILE
-        duration = 103.5
-        start_t = 0.0
-        end_t = 103.5
-    else:
-        # Dynamic slice
-        duration = req.end_time - req.start_time
-        if duration <= 1.0:
-            raise HTTPException(status_code=400, detail="Benchmark interval must be at least 1.0 second.")
-        src_audio = _find_source_audio()
-        sliced_audio = BENCHMARK_DIR / f"benchmark_dynamic_{int(req.start_time)}_{int(req.end_time)}.wav"
+    # Handle audio slice & optional audio preprocessing filter
+    base_audio = cfg["audio_file"]
+    duration = cfg["duration"]
+    start_t = cfg["start_time"]
+    end_t = cfg["end_time"]
+    temp_filtered_audio: Optional[Path] = None
+
+    if req.audio_filter == "highpass_gain":
+        temp_filtered_audio = BENCHMARK_DIR / f"temp_{current_sample_id}_highpass_gain_{int(time.time())}.wav"
         ffmpeg = find_ffmpeg()
         cmd = [
             ffmpeg, "-y",
-            "-ss", str(req.start_time),
-            "-t", str(duration),
-            "-i", str(src_audio),
-            "-vn", "-ac", "1", "-ar", "16000",
-            str(sliced_audio),
+            "-i", str(base_audio),
+            "-af", "highpass=f=80,volume=3dB",
+            "-ac", "1", "-ar", "16000",
+            str(temp_filtered_audio),
         ]
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        start_t = req.start_time
-        end_t = req.end_time
+        active_audio = temp_filtered_audio
+    else:
+        active_audio = base_audio
 
     benchmark_runs = []
 
     for model_id in req.model_ids:
         if not is_model_downloaded(model_id):
             benchmark_runs.append({
+                "sample_id": current_sample_id,
+                "sample_name": cfg["name"],
                 "model_id": model_id,
                 "name": SUPPORTED_MODELS.get(model_id, {}).get("name", model_id),
                 "status": "skipped",
@@ -527,7 +660,7 @@ def run_benchmark(req: BenchmarkRunRequest):
 
         try:
             res = run_transcription_pipeline(
-                input_path=sliced_audio,
+                input_path=active_audio,
                 job_id=job_id,
                 model_id=model_id,
                 language="ar",
@@ -544,6 +677,9 @@ def run_benchmark(req: BenchmarkRunRequest):
             meta = res["metadata"]
 
             run_entry: Dict[str, Any] = {
+                "sample_id": current_sample_id,
+                "sample_name": cfg["name"],
+                "audio_filter": req.audio_filter or "none",
                 "model_id": model_id,
                 "name": SUPPORTED_MODELS.get(model_id, {}).get("name", model_id),
                 "status": "success",
@@ -557,6 +693,7 @@ def run_benchmark(req: BenchmarkRunRequest):
                 "speedup": round(duration / max(0.1, elapsed), 2),
                 "predicted_text": pred_text,
                 "is_verified": has_valid_human_ref,
+                "reference_revision": rev_hash,
             }
 
             if has_valid_human_ref:
@@ -595,28 +732,25 @@ def run_benchmark(req: BenchmarkRunRequest):
 
         except Exception as e:
             benchmark_runs.append({
+                "sample_id": current_sample_id,
+                "sample_name": cfg["name"],
                 "model_id": model_id,
                 "name": SUPPORTED_MODELS.get(model_id, {}).get("name", model_id),
                 "status": "failed",
                 "error": str(e),
             })
 
-    # Clean up dynamic slice if created
-    if "benchmark_dynamic_" in str(sliced_audio):
-        sliced_audio.unlink(missing_ok=True)
+    # Cleanup temp filtered audio
+    if temp_filtered_audio and temp_filtered_audio.exists():
+        temp_filtered_audio.unlink(missing_ok=True)
 
-    # Save to corresponding results file
-    if is_holdout_sample:
-        target_results_file = HOLDOUT_RESULTS_FILE
-    elif is_test_sample:
-        target_results_file = TEST_RESULTS_FILE
-    else:
-        target_results_file = DEV_RESULTS_FILE
-    target_results_file.write_text(json.dumps(benchmark_runs, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Save to canonical results file
+    cfg["results_file"].write_text(json.dumps(benchmark_runs, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {
         "status": "completed",
         "sample_id": current_sample_id,
+        "sample_name": cfg["name"],
         "is_human_verified": has_valid_human_ref,
         "audio_interval": f"{start_t:.1f}s - {end_t:.1f}s ({duration:.1f}s)",
         "results": benchmark_runs,

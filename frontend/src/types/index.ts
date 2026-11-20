@@ -115,6 +115,9 @@ export interface WordAlignmentOp {
 }
 
 export interface BenchmarkRunResult {
+  sample_id?: string;
+  sample_name?: string;
+  audio_filter?: string;
   model_id: string;
   name: string;
   status: 'success' | 'failed' | 'skipped';
@@ -126,6 +129,7 @@ export interface BenchmarkRunResult {
   speedup?: number;
   is_verified?: boolean;
   verification_notice?: string;
+  reference_revision?: string;
   norm_wer?: number | null;
   norm_cer?: number | null;
   norm_sub?: number | null;
@@ -151,19 +155,28 @@ export interface BenchmarkSample {
   status: 'VERIFIED' | 'UNVERIFIED';
   verification_badge: string;
   has_human_reference: boolean;
+  is_human_verified?: boolean;
   word_count: number;
   description: string;
 }
 
 export interface BenchmarkReference {
   sample_id?: string;
+  sample_name?: string;
   has_reference: boolean;
   is_human_verified?: boolean;
   verification_status?: string;
+  verification_badge?: string;
+  verification_statement?: string;
+  verification_method?: string;
+  verification_timestamp?: number;
+  reference_revision?: string;
   raw_text: string;
   normalized_text: string;
   start_time: number;
   end_time: number;
+  duration?: number;
   word_count_raw?: number;
   word_count_norm?: number;
+  updated_at?: number;
 }

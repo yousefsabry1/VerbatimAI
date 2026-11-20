@@ -238,8 +238,9 @@ export const api = {
   async saveBenchmarkReference(params: {
     sample_id?: string;
     reference_text: string;
-    start_time: number;
-    end_time: number;
+    action?: 'save_draft' | 'save_and_verify';
+    start_time?: number;
+    end_time?: number;
     is_human_verified?: boolean;
     verification_statement?: string;
   }): Promise<any> {
@@ -248,11 +249,30 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (!res.ok) throw new Error('Failed to save benchmark reference');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to save benchmark reference' }));
+      throw new Error(err.detail || 'Failed to save benchmark reference');
+    }
     return res.json();
   },
 
-  async getBenchmarkResults(sampleId: string = 'dev_0_103'): Promise<{ has_results: boolean; sample_id?: string; results: any[] }> {
+  async calculateBenchmarkAccuracy(params: {
+    sample_id: string;
+    eval_mode?: 'normalized' | 'raw';
+  }): Promise<{ status: string; sample_id: string; sample_name?: string; is_human_verified: boolean; eval_mode: string; evaluated_models: number; results: any[] }> {
+    const res = await fetch(`${API_BASE}/benchmark/calculate-accuracy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to calculate accuracy' }));
+      throw new Error(err.detail || 'Failed to calculate accuracy metrics');
+    }
+    return res.json();
+  },
+
+  async getBenchmarkResults(sampleId: string = 'dev_0_103'): Promise<{ has_results: boolean; sample_id?: string; sample_name?: string; is_human_verified?: boolean; results: any[] }> {
     const res = await fetch(`${API_BASE}/benchmark/results?sample_id=${encodeURIComponent(sampleId)}`);
     if (!res.ok) throw new Error('Failed to fetch benchmark results');
     return res.json();
@@ -268,6 +288,7 @@ export const api = {
     custom_hints?: string | null;
     eval_mode: string;
     vad_filter?: boolean;
+    audio_filter?: 'none' | 'highpass_gain';
   }): Promise<any> {
     const res = await fetch(`${API_BASE}/benchmark/run`, {
       method: 'POST',

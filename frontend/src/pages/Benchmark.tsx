@@ -27,6 +27,8 @@ import {
   ShieldAlert,
   Sliders,
   HelpCircle,
+  Calculator,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface BenchmarkProps {
@@ -75,19 +77,21 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
       verification_badge: 'UNVERIFIED — Pending Human Transcription',
       has_human_reference: false,
       word_count: 0,
-      description: 'Strict unseen out-of-sample holdout audio interval (05:00 - 05:45). Reference left blank for manual human transcription.',
+      description: 'Strict unseen out-of-sample holdout audio interval (05:00 - 05:45). Reference manually transcribed by user.',
     },
   ]);
-  const [activeSampleId, setActiveSampleId] = useState<string>('test_180_225');
+  const [activeSampleId, setActiveSampleId] = useState<string>('holdout_300_345');
+  const activeSampleRef = useRef<string>('holdout_300_345');
 
-  // Human Reference & Boundaries State
+  // Human Reference & State
   const [refText, setRefText] = useState<string>('');
+  const [savedRefText, setSavedRefText] = useState<string>('');
   const [isHumanVerified, setIsHumanVerified] = useState<boolean>(false);
-  const [verificationBadge, setVerificationBadge] = useState<string>('UNVERIFIED — No valid WER/CER available');
+  const [verificationBadge, setVerificationBadge] = useState<string>('UNVERIFIED — Pending Human Transcription');
   const [certificationChecked, setCertificationChecked] = useState<boolean>(false);
 
-  const [startTime, setStartTime] = useState<number>(180.0);
-  const [endTime, setEndTime] = useState<number>(225.0);
+  const [startTime, setStartTime] = useState<number>(300.0);
+  const [endTime, setEndTime] = useState<number>(345.0);
   const [selectedModels, setSelectedModels] = useState<string[]>([
     'codeswitched-medium',
     'medium',
@@ -95,23 +99,25 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
   ]);
   const [deviceMode, setDeviceMode] = useState<string>('auto');
   const [evalMode, setEvalMode] = useState<'normalized' | 'raw'>('normalized');
-  const [vadFilter, setVadFilter] = useState<boolean>(false); // False prevents clipping conversational onsets
+  const [vadFilter, setVadFilter] = useState<boolean>(false);
+  const [audioFilter, setAudioFilter] = useState<'none' | 'highpass_gain'>('none');
   const [useHints, setUseHints] = useState<boolean>(false);
   const [customHints, setCustomHints] = useState<string>('');
 
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [results, setResults] = useState<BenchmarkRunResult[]>([]);
+
+  // Results per sample to guarantee complete isolation and zero cross-sample contamination
+  const [resultsBySample, setResultsBySample] = useState<Record<string, BenchmarkRunResult[]>>({});
   const [selectedResultIndex, setSelectedResultIndex] = useState<number>(0);
   const [compareIndexB, setCompareIndexB] = useState<number>(1);
   const [isComparingSideBySide, setIsComparingSideBySide] = useState<boolean>(false);
 
   const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [isCalculatingAccuracy, setIsCalculatingAccuracy] = useState<boolean>(false);
+  const [isSavingDraft, setIsSavingDraft] = useState<boolean>(false);
+  const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  // Live Human Correction State
-  const [editedHypText, setEditedHypText] = useState<string>('');
-  const [isLiveAligning, setIsLiveAligning] = useState<boolean>(false);
 
   // Audio Playback State
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -123,7 +129,11 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  const countWords = (text: string): number => {
+    return text.trim().split(/\s+/).filter(Boolean).length;
   };
 
   // Load samples and active reference on mount
@@ -138,28 +148,45 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
       setAvailableModels(res.models);
     }).catch(() => {});
 
-    loadSampleData('test_180_225');
+    loadSampleData('holdout_300_345');
   }, []);
 
   const loadSampleData = async (sampleId: string) => {
     setActiveSampleId(sampleId);
+    activeSampleRef.current = sampleId;
+
     try {
       const refRes = await api.getBenchmarkReference(sampleId);
-      setRefText(refRes.raw_text || '');
-      setIsHumanVerified(Boolean(refRes.is_human_verified));
-      setVerificationBadge(refRes.verification_status || (refRes.is_human_verified ? 'Verified Human Reference' : 'UNVERIFIED — No valid WER/CER available'));
-      setCertificationChecked(Boolean(refRes.is_human_verified));
+      // Ensure response matches active sample (reject stale responses)
+      if (activeSampleRef.current !== sampleId) return;
+
+      const raw = refRes.raw_text || '';
+      setRefText(raw);
+      setSavedRefText(raw);
+      const verified = Boolean(refRes.is_human_verified);
+      setIsHumanVerified(verified);
+      setCertificationChecked(verified);
+      setVerificationBadge(
+        refRes.verification_badge ||
+          (verified
+            ? `Verified Human Reference (${countWords(raw)} words)`
+            : countWords(raw) > 0
+            ? `Draft Saved (${countWords(raw)} words) — Unverified`
+            : 'UNVERIFIED — Pending Human Transcription')
+      );
 
       if (refRes.start_time !== undefined) setStartTime(refRes.start_time);
       if (refRes.end_time !== undefined) setEndTime(refRes.end_time);
 
       const resultsRes = await api.getBenchmarkResults(sampleId);
+      if (activeSampleRef.current !== sampleId) return;
+
       if (resultsRes.has_results && resultsRes.results.length > 0) {
-        setResults(resultsRes.results);
+        setResultsBySample(prev => ({ ...prev, [sampleId]: resultsRes.results }));
         setSelectedResultIndex(0);
         if (resultsRes.results.length > 1) setCompareIndexB(1);
       } else {
-        setResults([]);
+        setResultsBySample(prev => ({ ...prev, [sampleId]: [] }));
       }
 
       if (audioRef.current) {
@@ -174,49 +201,153 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
   };
 
   const handleSelectSample = (sampleId: string) => {
+    if (sampleId === activeSampleId) return;
     loadSampleData(sampleId);
   };
 
-  // Update edited hypothesis whenever selected result changes
-  useEffect(() => {
-    if (results[selectedResultIndex]?.predicted_text) {
-      setEditedHypText(results[selectedResultIndex].predicted_text || '');
-    }
-  }, [selectedResultIndex, results]);
+  const currentResults = resultsBySample[activeSampleId] || [];
+  const activeResult = currentResults[selectedResultIndex];
+  const activeSample = samples.find(s => s.sample_id === activeSampleId) || samples[0];
 
-  const handleSaveReference = async () => {
+  // Derive reference status
+  const currentWordCount = countWords(refText);
+  const isDirty = refText.trim() !== savedRefText.trim();
+
+  let referenceStatusKey: 'NO_REFERENCE' | 'UNSAVED_CHANGES' | 'DRAFT_SAVED' | 'HUMAN_VERIFIED';
+  let referenceStatusLabel: string;
+  let referenceStatusClass: string;
+
+  if (currentWordCount === 0) {
+    referenceStatusKey = 'NO_REFERENCE';
+    referenceStatusLabel = 'No Reference';
+    referenceStatusClass = 'bg-surface-800 text-surface-400 border-surface-700';
+  } else if (isDirty) {
+    referenceStatusKey = 'UNSAVED_CHANGES';
+    referenceStatusLabel = 'Unsaved Changes';
+    referenceStatusClass = 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse';
+  } else if (isHumanVerified) {
+    referenceStatusKey = 'HUMAN_VERIFIED';
+    referenceStatusLabel = 'Human Verified';
+    referenceStatusClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
+  } else {
+    referenceStatusKey = 'DRAFT_SAVED';
+    referenceStatusLabel = 'Draft Saved (Unverified)';
+    referenceStatusClass = 'bg-blue-500/20 text-blue-300 border-blue-500/40';
+  }
+
+  // Handle Save Draft (Explicitly unverified)
+  const handleSaveDraft = async () => {
     if (!refText.trim()) {
-      alert('Please enter reference text before saving.');
+      alert('Please enter reference text before saving draft.');
       return;
     }
 
-    if (activeSampleId === 'test_180_225' && !certificationChecked) {
-      alert('Integrity Safeguard: You must certify that this transcript was verified manually by a human against the audio before saving.');
-      return;
-    }
-
+    setIsSavingDraft(true);
     try {
       const res = await api.saveBenchmarkReference({
         sample_id: activeSampleId,
         reference_text: refText.trim(),
+        action: 'save_draft',
         start_time: startTime,
         end_time: endTime,
-        is_human_verified: certificationChecked,
-        verification_statement: certificationChecked
-          ? 'Human user manually transcribed and verified against dd.ogg recording.'
-          : undefined,
+        is_human_verified: false,
       });
 
-      setIsHumanVerified(res.is_human_verified);
-      setVerificationBadge(res.is_human_verified ? `Verified Human Reference (${refText.trim().split(/\s+/).length} words)` : 'UNVERIFIED — No valid WER/CER available');
+      setSavedRefText(refText.trim());
+      setIsHumanVerified(false);
+      setCertificationChecked(false);
+      setVerificationBadge(`Draft Saved (${countWords(refText)} words) — Unverified`);
 
       // Refresh samples list
       const samplesRes = await api.getBenchmarkSamples();
       if (samplesRes.samples) setSamples(samplesRes.samples);
 
-      showToast(res.message || 'Reference saved successfully!');
+      // If results existed, refresh them as unverified
+      const resultsRes = await api.getBenchmarkResults(activeSampleId);
+      if (resultsRes.results) {
+        setResultsBySample(prev => ({ ...prev, [activeSampleId]: resultsRes.results }));
+      }
+
+      showToast(res.message || 'Reference draft saved successfully. Verification is still required before accuracy metrics can be calculated.');
     } catch (err: any) {
-      alert('Failed to save reference: ' + err.message);
+      alert('Failed to save draft: ' + err.message);
+    } finally {
+      setIsSavingDraft(false);
+    }
+  };
+
+  // Handle Save & Verify Reference (Explicit human certification)
+  const handleSaveAndVerify = async () => {
+    if (!refText.trim()) {
+      alert('Please enter reference text before certifying.');
+      return;
+    }
+
+    if (!certificationChecked) {
+      alert(
+        'Integrity Safeguard:\n\nYou must explicitly check the confirmation checkbox:\n"I confirm that I personally listened to the original audio and manually verified this transcript against what was actually spoken."\n\nThis prevents unverified transcripts from generating false accuracy metrics.'
+      );
+      return;
+    }
+
+    setIsVerifying(true);
+    try {
+      const res = await api.saveBenchmarkReference({
+        sample_id: activeSampleId,
+        reference_text: refText.trim(),
+        action: 'save_and_verify',
+        start_time: startTime,
+        end_time: endTime,
+        is_human_verified: true,
+        verification_statement:
+          'I confirm that I personally listened to the original audio and manually verified this transcript against what was actually spoken.',
+      });
+
+      setSavedRefText(refText.trim());
+      setIsHumanVerified(true);
+      setVerificationBadge(`Verified Human Reference (${countWords(refText)} words)`);
+
+      // Refresh samples list
+      const samplesRes = await api.getBenchmarkSamples();
+      if (samplesRes.samples) setSamples(samplesRes.samples);
+
+      // If candidate predictions exist for this sample, automatically calculate accuracy
+      const resultsRes = await api.getBenchmarkResults(activeSampleId);
+      if (resultsRes.results && resultsRes.results.length > 0) {
+        setResultsBySample(prev => ({ ...prev, [activeSampleId]: resultsRes.results }));
+      }
+
+      showToast(res.message || 'Human reference verified successfully. Accuracy evaluation is now available.');
+    } catch (err: any) {
+      alert('Verification failed: ' + err.message);
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  // Dedicated Action: Calculate Accuracy without re-running models
+  const handleCalculateAccuracy = async () => {
+    if (!isHumanVerified) {
+      alert('Cannot calculate accuracy: Please verify the human reference first.');
+      return;
+    }
+
+    setIsCalculatingAccuracy(true);
+    try {
+      const res = await api.calculateBenchmarkAccuracy({
+        sample_id: activeSampleId,
+        eval_mode: evalMode,
+      });
+
+      if (res.results) {
+        setResultsBySample(prev => ({ ...prev, [activeSampleId]: res.results }));
+        setSelectedResultIndex(0);
+        showToast('Accuracy metrics calculated successfully from stored candidate predictions!');
+      }
+    } catch (err: any) {
+      alert('Failed to calculate accuracy: ' + err.message);
+    } finally {
+      setIsCalculatingAccuracy(false);
     }
   };
 
@@ -230,9 +361,10 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
     }
   };
 
+  // Run Benchmark inference
   const handleRunBenchmark = async () => {
     setIsRunning(true);
-    setStatusMessage(`Running candidate models on ${activeSampleId === 'test_180_225' ? 'Independent Test Sample (03:00 - 03:45)' : 'Development Sample'}...`);
+    setStatusMessage(`Running candidate models on ${activeSample.name}...`);
 
     try {
       const res = await api.runBenchmark({
@@ -245,18 +377,22 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
         custom_hints: customHints.trim() ? customHints.trim() : null,
         eval_mode: evalMode,
         vad_filter: vadFilter,
+        audio_filter: audioFilter,
       });
 
-      setResults(res.results || []);
-      setSelectedResultIndex(0);
-      if (res.results && res.results.length > 1) {
-        setCompareIndexB(1);
-      }
+      // Reject stale responses if user switched sample during inference
+      if (res.sample_id === activeSampleRef.current) {
+        setResultsBySample(prev => ({ ...prev, [res.sample_id]: res.results || [] }));
+        setSelectedResultIndex(0);
+        if (res.results && res.results.length > 1) {
+          setCompareIndexB(1);
+        }
 
-      if (res.is_human_verified) {
-        showToast('Benchmark run completed with verified WER/CER metrics!');
-      } else {
-        showToast('Transcription generated. Metrics marked UNVERIFIED pending human reference.');
+        if (res.is_human_verified) {
+          showToast('Benchmark run completed with verified WER/CER metrics!');
+        } else {
+          showToast('Model inference completed. Verify the human reference to unlock accuracy metrics.');
+        }
       }
     } catch (err: any) {
       alert('Benchmark run failed: ' + err.message);
@@ -305,77 +441,39 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
     }
   };
 
-  const handleRecalculateAlignment = async () => {
-    if (!refText.trim() || !editedHypText.trim()) return;
-    setIsLiveAligning(true);
-    try {
-      const res = await api.liveAlign(refText, editedHypText, evalMode);
-      if (res.status === 'success' && res.metrics) {
-        const m = res.metrics;
-        const updated = [...results];
-        if (updated[selectedResultIndex]) {
-          updated[selectedResultIndex] = {
-            ...updated[selectedResultIndex],
-            norm_wer: m.wer_percent,
-            norm_cer: m.cer_percent,
-            norm_sub: m.substitutions,
-            norm_del: m.deletions,
-            norm_ins: m.insertions,
-            norm_hits: m.hits,
-            predicted_text: editedHypText,
-            word_alignment: m.word_alignment,
-          };
-          setResults(updated);
-          showToast('Live alignment recalculated successfully!');
-        }
-      }
-    } catch (e: any) {
-      alert('Alignment calculation failed: ' + e.message);
-    } finally {
-      setIsLiveAligning(false);
-    }
-  };
-
   const handleExportReport = () => {
-    if (results.length === 0) return;
-    const dateStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    let md = `# VerbatimAI Accuracy Benchmark Report\n\n`;
-    md += `**Date**: ${dateStr}\n`;
-    md += `**Sample**: ${activeSampleId === 'test_180_225' ? 'Independent Test Sample (03:00 - 03:45)' : 'Development Sample (00:00 - 01:43)'}\n`;
-    md += `**Verification Status**: ${isHumanVerified ? 'VERIFIED HUMAN GROUND TRUTH' : 'UNVERIFIED — No valid WER/CER available'}\n`;
-    md += `**Evaluation Mode**: ${evalMode}\n\n`;
-    md += `## Candidate Performance Matrix\n\n`;
-    md += `| Model | Device | Status | WER (%) | CER (%) | Sub (S) | Del (D) | Ins (I) | Time (s) | Speedup |\n`;
-    md += `| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n`;
-    results.forEach(r => {
-      const isVer = r.is_verified && r.norm_wer !== null;
-      const werStr = isVer ? `${(evalMode === 'normalized' ? r.norm_wer : r.raw_wer)?.toFixed(2)}%` : 'UNVERIFIED';
-      const cerStr = isVer ? `${(evalMode === 'normalized' ? r.norm_cer : r.raw_cer)?.toFixed(2)}%` : '—';
-      const sub = isVer ? (evalMode === 'normalized' ? r.norm_sub : r.raw_sub) : '—';
-      const del = isVer ? (evalMode === 'normalized' ? r.norm_del : r.raw_del) : '—';
-      const ins = isVer ? (evalMode === 'normalized' ? r.norm_ins : r.raw_ins) : '—';
-      md += `| **${r.name}** | ${r.device || 'N/A'} (${r.compute || ''}) | ${isVer ? 'Verified' : 'Unverified'} | ${werStr} | ${cerStr} | ${sub} | ${del} | ${ins} | ${r.elapsed_seconds || 0}s | ${r.speedup || 0}x |\n`;
-    });
-    md += `\n## Human Reference\n\n\`\`\`text\n${refText || '[No human reference provided yet]'}\n\`\`\`\n\n`;
-    md += `## Model Predictions\n\n`;
-    results.forEach(r => {
-      md += `### ${r.name}\n\n\`\`\`text\n${r.predicted_text || 'No prediction'}\n\`\`\`\n\n`;
-    });
-
-    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const reportData = {
+      benchmark_report_title: `Verbatim AI Accuracy Benchmark — ${activeSample.name}`,
+      exported_at: new Date().toISOString(),
+      sample_id: activeSampleId,
+      sample_name: activeSample.name,
+      audio_interval: `${activeSample.start_time}s - ${activeSample.end_time}s (${activeSample.duration}s)`,
+      is_human_verified: isHumanVerified,
+      reference_text: refText,
+      evaluation_mode: evalMode,
+      audio_filter: audioFilter,
+      results: currentResults,
+    };
+    const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `verbatim_ai_benchmark_${activeSampleId}_${Math.round(startTime)}s_${Math.round(endTime)}s.md`;
-    document.body.appendChild(a);
+    a.download = `benchmark_${activeSampleId}_${evalMode}_${Date.now()}.json`;
     a.click();
-    a.remove();
     URL.revokeObjectURL(url);
-    showToast('Benchmark report exported as Markdown!');
   };
 
-  const activeResult = results[selectedResultIndex] || null;
-  const compareResult = results[compareIndexB] || null;
+  // Determine lowest WER model ONLY when verified and metrics are numerically valid
+  const validEvaluatedResults = currentResults.filter(
+    r => r.status === 'success' && r.is_verified && (evalMode === 'normalized' ? r.norm_wer != null : r.raw_wer != null)
+  );
+
+  const lowestWer =
+    isHumanVerified && validEvaluatedResults.length > 0
+      ? Math.min(
+          ...validEvaluatedResults.map(r => (evalMode === 'normalized' ? r.norm_wer! : r.raw_wer!))
+        )
+      : null;
 
   return (
     <div className="space-y-6 animate-fadeIn pb-16">
@@ -393,12 +491,12 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
         src={api.getBenchmarkAudioUrl(activeSampleId)}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={() => {
-          if (audioRef.current) setAudioDuration(audioRef.current.duration || 45.0);
+          if (audioRef.current) setAudioDuration(audioRef.current.duration || activeSample.duration || 45.0);
         }}
         onEnded={handleAudioEnded}
       />
 
-      {/* Page Title & Integrity Badge */}
+      {/* Page Title & GPU Badge */}
       <div className="space-y-1">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -407,13 +505,13 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
               <span>ASR Accuracy Benchmark & Integrity Review</span>
             </h1>
             <p className="text-xs sm:text-sm text-surface-400 light:text-surface-600">
-              Controlled speech recognition benchmarking with strict human-verification safeguards and zero synthetic ground truth.
+              Scientific speech recognition benchmarking with strict human-verification safeguards and zero synthetic ground truth.
             </p>
           </div>
 
           {/* Action Buttons */}
           <div className="flex items-center gap-2">
-            {results.length > 0 && (
+            {currentResults.length > 0 && (
               <button
                 type="button"
                 onClick={handleExportReport}
@@ -442,13 +540,13 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
             Benchmark Integrity Notice — Formal Retraction of Slice 245s–295s (30.22% WER)
           </span>
           <p className="text-[11px] text-amber-200/80 leading-relaxed">
-            The previously reported 30.22% WER on audio slice 245s–295s has been invalidated because the reference was bootstrapped using model assistance rather than human transcription. In Verbatim AI, no transcript is considered ground truth without explicit human certification.
+            The previously reported 30.22% WER on audio slice 245s–295s was retracted because the reference was generated using model assistance rather than human transcription. In Verbatim AI, no transcript is considered ground truth without explicit human certification.
           </p>
         </div>
       </div>
 
       {/* Benchmark Sample Switcher Tabs */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {samples.map(s => {
           const isSelected = s.sample_id === activeSampleId;
           const isVerified = s.status === 'VERIFIED';
@@ -475,15 +573,15 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                       : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
                   }`}
                 >
-                  {isVerified ? 'VERIFIED HUMAN' : 'UNVERIFIED'}
+                  {isVerified ? 'VERIFIED' : 'UNVERIFIED'}
                 </span>
               </div>
-              <p className="text-xs text-surface-400 leading-relaxed mb-3">{s.description}</p>
+              <p className="text-xs text-surface-400 leading-relaxed mb-3 line-clamp-2">{s.description}</p>
               <div className="flex items-center justify-between text-[11px] font-mono text-surface-400 pt-2 border-t border-surface-800/60">
                 <span>Duration: {s.duration.toFixed(1)}s</span>
                 <span>Word Count: {s.word_count} words</span>
                 <span className="font-sans font-semibold text-brand-300">
-                  {isSelected ? '● Active Sample' : 'Click to Switch'}
+                  {isSelected ? '● Active' : 'Switch'}
                 </span>
               </div>
             </div>
@@ -511,7 +609,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
             <input
               type="range"
               min="0"
-              max={audioDuration || 45.0}
+              max={audioDuration || activeSample.duration || 45.0}
               step="0.1"
               value={currentTime}
               onChange={handleSeek}
@@ -547,7 +645,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
 
           {/* Playback Speed Controls */}
           <div className="space-y-1.5">
-            <label className="text-[11px] font-semibold text-surface-400 block flex items-center gap-1.5">
+            <label className="text-[11px] font-semibold text-surface-400 flex items-center gap-1.5">
               <Sliders className="h-3.5 w-3.5 text-brand-400" />
               <span>Playback Speed (for Human Transcription):</span>
             </label>
@@ -598,76 +696,73 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
               ))}
             </div>
           </div>
+
+          {/* Audio Preprocessing Option */}
+          <div className="space-y-1.5 pt-2 border-t border-surface-800/60 text-xs">
+            <label className="text-surface-400 font-semibold block">Audio Preprocessing Preset:</label>
+            <select
+              value={audioFilter}
+              onChange={e => setAudioFilter(e.target.value as any)}
+              className="w-full rounded-lg border border-surface-800 bg-surface-950 p-2 text-xs text-white"
+            >
+              <option value="none">Standard Audio (Baseline)</option>
+              <option value="highpass_gain">80Hz High-Pass + 3dB Gain (Acoustic Filter)</option>
+            </select>
+          </div>
         </div>
 
         {/* Human Ground Truth Reference Panel */}
         <div className="lg:col-span-2 rounded-2xl border border-surface-800 bg-surface-900/50 p-5 light:border-surface-200 light:bg-white space-y-4 flex flex-col justify-between">
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-white light:text-surface-900 flex items-center gap-2">
-                <FileText className="h-4 w-4 text-emerald-400" />
-                <span>Human Ground-Truth Reference</span>
-              </h3>
+              <div>
+                <h3 className="text-sm font-bold text-white light:text-surface-900 flex items-center gap-2">
+                  <FileText className="h-4 w-4 text-emerald-400" />
+                  <span>Human Ground-Truth Reference</span>
+                </h3>
+                <span className="text-xs text-surface-400 font-normal">
+                  {activeSample.name} ({activeSample.start_time.toFixed(1)}s - {activeSample.end_time.toFixed(1)}s)
+                </span>
+              </div>
 
               <div className="flex items-center gap-2">
-                <span
-                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide uppercase border ${
-                    isHumanVerified
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                      : 'bg-amber-500/20 text-amber-300 border-amber-500/30 animate-pulse'
-                  }`}
-                >
-                  {isHumanVerified ? 'VERIFIED' : 'UNVERIFIED — No valid WER/CER available'}
+                <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide uppercase border ${referenceStatusClass}`}>
+                  {referenceStatusLabel}
                 </span>
                 <span className="text-xs font-mono text-surface-400">
-                  {refText.split(/\s+/).filter(Boolean).length} words
+                  {currentWordCount} words
                 </span>
               </div>
             </div>
 
-            {/* Unverified Warning Banner if in test sample */}
-            {activeSampleId === 'test_180_225' && !isHumanVerified && (
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 text-xs text-amber-200 space-y-1">
-                <span className="font-bold flex items-center gap-1.5 text-amber-300">
-                  <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
-                  <span>Manual Human Verification Required</span>
-                </span>
-                <p className="text-[11px] text-amber-200/90 leading-relaxed">
-                  This 45-second audio slice (03:00 - 03:45) is an independent test sample. Play the audio on the left, transcribe the spoken words into the editor below, and check the certification box to unlock verified WER/CER benchmarking.
-                </p>
-              </div>
-            )}
-
+            {/* Reference Editor Textarea */}
             <textarea
               rows={6}
               value={refText}
               onChange={e => setRefText(e.target.value)}
-              placeholder={
-                activeSampleId === 'test_180_225'
-                  ? 'Listen to the 45-second audio and type the human ground-truth transcript here...'
-                  : 'Paste or edit the human ground-truth reference transcript...'
-              }
+              placeholder="Listen to the audio and transcribe the exact words spoken by human speakers (Egyptian Arabic + English technical loanwords)..."
               className="w-full rounded-xl border border-surface-800 bg-surface-950/80 p-3.5 text-xs text-white placeholder:text-surface-600 focus:outline-none focus:border-brand-500 resize-none font-sans leading-relaxed"
               dir="rtl"
             />
 
             {/* Human Verification Certification Checkbox */}
-            {activeSampleId === 'test_180_225' && (
-              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-surface-950/60 border border-surface-800/80 text-xs text-surface-200 cursor-pointer select-none">
+            <div className="p-3 rounded-xl bg-surface-950/70 border border-surface-800/90 text-xs space-y-1">
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
                 <input
                   type="checkbox"
                   checked={certificationChecked}
                   onChange={e => setCertificationChecked(e.target.checked)}
-                  className="mt-0.5 rounded border-surface-700 bg-surface-800 text-brand-500 focus:ring-brand-500"
+                  className="mt-0.5 rounded border-surface-700 bg-surface-800 text-brand-500 focus:ring-brand-500 cursor-pointer h-4 w-4"
                 />
-                <span className="text-[11px] leading-relaxed">
-                  <strong className="text-white">Human Certification:</strong> I certify that this transcript was verified manually by a human against the audio recording and was not copied or generated from an unverified ASR model prediction.
+                <span className="text-[11px] text-surface-200 leading-relaxed">
+                  <strong className="text-white font-semibold">Human Certification Check:</strong>{' '}
+                  I confirm that I personally listened to the original audio and manually verified this transcript against what was actually spoken.
                 </span>
               </label>
-            )}
+            </div>
           </div>
 
-          {/* Controls & Run Button */}
+          {/* Controls & Action Buttons */}
           <div className="pt-3 border-t border-surface-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
             <div className="flex flex-wrap items-center gap-3">
               <div>
@@ -677,8 +772,8 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                   onChange={e => setEvalMode(e.target.value as any)}
                   className="rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1 text-xs text-white"
                 >
-                  <option value="normalized">Normalized (Standard Arabic/English)</option>
-                  <option value="raw">Raw (Exact Punctuation & Casing)</option>
+                  <option value="normalized">Normalized (Arabic/English Standard)</option>
+                  <option value="raw">Raw (Exact Casing & Punctuation)</option>
                 </select>
               </div>
 
@@ -689,27 +784,54 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                   onChange={e => setVadFilter(e.target.value === 'true')}
                   className="rounded-lg border border-surface-800 bg-surface-900 px-2.5 py-1 text-xs text-white"
                 >
-                  <option value="false">Disabled (Optimal Egyptian Preset)</option>
+                  <option value="false">Disabled (Optimal for Speech Note)</option>
                   <option value="true">Enabled (Silero VAD)</option>
                 </select>
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            {/* Action Buttons: Save Draft, Save & Verify, Calculate Accuracy, Run Benchmark */}
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={handleSaveReference}
-                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-surface-700 bg-surface-800 text-xs font-semibold text-white hover:bg-surface-700 transition-colors"
+                disabled={isSavingDraft || isVerifying || isRunning}
+                onClick={handleSaveDraft}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-surface-700 bg-surface-800 text-xs font-semibold text-white hover:bg-surface-700 disabled:opacity-50 transition-colors"
+                title="Save transcript as draft without certifying. Verification is required before accuracy metrics can be calculated."
               >
-                <Save className="h-3.5 w-3.5" />
-                <span>Save Reference</span>
+                <Save className="h-3.5 w-3.5 text-surface-300" />
+                <span>{isSavingDraft ? 'Saving Draft...' : 'Save Draft'}</span>
               </button>
+
+              <button
+                type="button"
+                disabled={isSavingDraft || isVerifying || isRunning}
+                onClick={handleSaveAndVerify}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-emerald-500/40 bg-emerald-600/20 text-xs font-semibold text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-50 transition-colors shadow-sm"
+                title="Certify transcript as manually verified by a human to unlock valid WER/CER calculations."
+              >
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                <span>{isVerifying ? 'Certifying...' : 'Save & Verify Reference'}</span>
+              </button>
+
+              {currentResults.length > 0 && isHumanVerified && (
+                <button
+                  type="button"
+                  disabled={isCalculatingAccuracy || isRunning}
+                  onClick={handleCalculateAccuracy}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-brand-500/40 bg-brand-500/20 text-xs font-semibold text-brand-300 hover:bg-brand-500/30 disabled:opacity-50 transition-colors"
+                  title="Recalculate WER/CER from cached candidate predictions without re-running models"
+                >
+                  <Calculator className={`h-3.5 w-3.5 text-brand-400 ${isCalculatingAccuracy ? 'animate-spin' : ''}`} />
+                  <span>{isCalculatingAccuracy ? 'Calculating...' : 'Calculate Accuracy'}</span>
+                </button>
+              )}
 
               <button
                 type="button"
                 disabled={isRunning}
                 onClick={handleRunBenchmark}
-                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-brand-600 text-xs font-bold text-white shadow-lg shadow-brand-500/25 hover:bg-brand-500 disabled:opacity-50 transition-all active:scale-[0.98]"
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-600 text-xs font-bold text-white shadow-lg shadow-brand-500/25 hover:bg-brand-500 disabled:opacity-50 transition-all active:scale-[0.98]"
               >
                 <Sparkles className={`h-4 w-4 ${isRunning ? 'animate-spin' : ''}`} />
                 <span>{isRunning ? 'Evaluating...' : 'Run Benchmark'}</span>
@@ -727,7 +849,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
       )}
 
       {/* Candidate Performance Matrix Table */}
-      {results.length > 0 && (
+      {currentResults.length > 0 && (
         <div className="space-y-6 animate-fadeIn">
           <div className="rounded-2xl border border-surface-800 bg-surface-900/50 p-6 light:border-surface-200 light:bg-white space-y-4">
             <h3 className="text-base font-bold text-white light:text-surface-900 flex items-center justify-between">
@@ -736,7 +858,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                 <span>Candidate Performance Matrix ({evalMode === 'normalized' ? 'Normalized Metrics' : 'Raw Metrics'})</span>
               </span>
               <span className="text-xs font-normal text-surface-400">
-                Sample: {activeSampleId === 'test_180_225' ? 'Independent Test (03:00 - 03:45)' : 'Development Sample (00:00 - 01:43)'}
+                Sample: {activeSample.name} ({activeSample.start_time.toFixed(1)}s - {activeSample.end_time.toFixed(1)}s)
               </span>
             </h3>
 
@@ -757,16 +879,23 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-surface-800/60 font-mono">
-                  {results.map((r, idx) => {
+                  {currentResults.map((r, idx) => {
                     const isSuccess = r.status === 'success';
                     const isCurrent = idx === selectedResultIndex;
-                    const isVerified = r.is_verified && r.norm_wer !== null;
+                    const isRowVerified = Boolean(r.is_verified && isHumanVerified && r.norm_wer !== null);
 
                     const wer = evalMode === 'normalized' ? r.norm_wer : r.raw_wer;
                     const cer = evalMode === 'normalized' ? r.norm_cer : r.raw_cer;
                     const sub = evalMode === 'normalized' ? r.norm_sub : r.raw_sub;
                     const del = evalMode === 'normalized' ? r.norm_del : r.raw_del;
                     const ins = evalMode === 'normalized' ? r.norm_ins : r.raw_ins;
+
+                    const isLowestError =
+                      isRowVerified &&
+                      lowestWer !== null &&
+                      typeof wer === 'number' &&
+                      Math.abs(wer - lowestWer) < 0.001 &&
+                      validEvaluatedResults.length > 1;
 
                     return (
                       <tr
@@ -779,8 +908,8 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                         <td className="p-3 font-sans font-bold text-white">
                           <div className="flex items-center gap-2">
                             <span>{r.name}</span>
-                            {r.model_id === 'codeswitched-medium' && (
-                              <span className="px-1.5 py-0.5 rounded text-[9px] bg-brand-500/20 text-brand-300 border border-brand-500/30">
+                            {isLowestError && (
+                              <span className="px-1.5 py-0.5 rounded text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                                 Lowest Error Rate
                               </span>
                             )}
@@ -798,13 +927,13 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                         </td>
                         <td className="p-3 text-center font-bold text-sm">
                           {isSuccess ? (
-                            isVerified ? (
-                              <span className={wer! < 60 ? 'text-emerald-400' : 'text-amber-400'}>
-                                {wer?.toFixed(2)}%
+                            isRowVerified && typeof wer === 'number' ? (
+                              <span className={wer < 60 ? 'text-emerald-400' : 'text-amber-400'}>
+                                {wer.toFixed(2)}%
                               </span>
                             ) : (
                               <span className="px-2 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                UNVERIFIED — No valid WER/CER available
+                                UNVERIFIED — Draft
                               </span>
                             )
                           ) : (
@@ -812,17 +941,17 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                           )}
                         </td>
                         <td className="p-3 text-center font-bold text-sm">
-                          {isSuccess && isVerified ? (
-                            <span className={cer! < 35 ? 'text-emerald-400' : 'text-amber-400'}>
-                              {cer?.toFixed(2)}%
+                          {isSuccess && isRowVerified && typeof cer === 'number' ? (
+                            <span className={cer < 35 ? 'text-emerald-400' : 'text-amber-400'}>
+                              {cer.toFixed(2)}%
                             </span>
                           ) : (
                             '—'
                           )}
                         </td>
-                        <td className="p-3 text-center text-amber-400">{isSuccess && isVerified ? sub : '—'}</td>
-                        <td className="p-3 text-center text-rose-400">{isSuccess && isVerified ? del : '—'}</td>
-                        <td className="p-3 text-center text-purple-400">{isSuccess && isVerified ? ins : '—'}</td>
+                        <td className="p-3 text-center text-amber-400">{isSuccess && isRowVerified ? sub : '—'}</td>
+                        <td className="p-3 text-center text-rose-400">{isSuccess && isRowVerified ? del : '—'}</td>
+                        <td className="p-3 text-center text-purple-400">{isSuccess && isRowVerified ? ins : '—'}</td>
                         <td className="p-3 text-center text-surface-300">
                           {isSuccess ? `${r.elapsed_seconds}s` : '—'}
                         </td>
@@ -849,6 +978,23 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                 </tbody>
               </table>
             </div>
+
+            {/* If inference complete but unverified reference */}
+            {!isHumanVerified && currentResults.length > 0 && (
+              <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/30 text-xs text-blue-200 flex items-center justify-between gap-4">
+                <span className="flex items-center gap-2">
+                  <Info className="h-4 w-4 text-blue-400 shrink-0" />
+                  <span>Model inference completed. Verify the human reference above to unlock accuracy metrics.</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleSaveAndVerify}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-500 text-xs shrink-0"
+                >
+                  Certify & Calculate
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Model Transcript Inspection Panel */}
@@ -861,13 +1007,13 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
                     <span>Candidate Transcript: {activeResult.name}</span>
                   </h3>
                   <p className="text-xs text-surface-400">
-                    {activeResult.is_verified
+                    {activeResult.is_verified && isHumanVerified
                       ? 'Inspecting prediction against verified human ground truth with edit operations.'
                       : 'Unverified sample prediction. Review spoken audio against this candidate to prepare human reference.'}
                   </p>
                 </div>
 
-                {activeResult.is_verified && results.length > 1 && (
+                {activeResult.is_verified && isHumanVerified && currentResults.length > 1 && (
                   <button
                     type="button"
                     onClick={() => setIsComparingSideBySide(!isComparingSideBySide)}
@@ -885,7 +1031,7 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
               </div>
 
               {/* Word-Level Diff (only if verified) */}
-              {activeResult.is_verified && activeResult.word_alignment && activeResult.word_alignment.length > 0 && (
+              {activeResult.is_verified && isHumanVerified && activeResult.word_alignment && activeResult.word_alignment.length > 0 && (
                 <div className="space-y-3 pt-3 border-t border-surface-800/60">
                   <span className="text-xs font-bold text-surface-300 block">Visual Word-Level Alignment:</span>
                   <div className="p-4 rounded-xl bg-surface-950/60 border border-surface-800 flex flex-wrap gap-1.5 text-xs leading-loose" dir="rtl">
