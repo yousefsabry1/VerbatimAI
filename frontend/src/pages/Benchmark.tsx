@@ -29,14 +29,54 @@ import {
   HelpCircle,
   Calculator,
   ShieldCheck,
+  Plus,
+  Trash2,
+  X,
+  FileAudio,
 } from 'lucide-react';
 
 interface BenchmarkProps {
   hardware: HardwareInfo | null;
+  initialCreateJobId?: string | null;
+  onClearInitialCreateJob?: () => void;
 }
 
-export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
+export const Benchmark: React.FC<BenchmarkProps> = ({
+  hardware,
+  initialCreateJobId,
+  onClearInitialCreateJob,
+}) => {
   const { t, isRTL } = useI18n();
+
+  // Create Sample Modal State
+  const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
+  const [sourceRecordings, setSourceRecordings] = useState<
+    Array<{
+      job_id: string;
+      filename: string;
+      path: string;
+      duration: number;
+      duration_formatted: string;
+      format: string;
+      created_at: string;
+    }>
+  >([]);
+  const [selectedSourceJobId, setSelectedSourceJobId] = useState<string>('');
+  const [newSampleName, setNewSampleName] = useState<string>('');
+  const [newSampleStart, setNewSampleStart] = useState<number>(0);
+  const [newSampleEnd, setNewSampleEnd] = useState<number>(45);
+  const [newSampleDescription, setNewSampleDescription] = useState<string>('');
+  const [isLoadingRecordings, setIsLoadingRecordings] = useState<boolean>(false);
+  const [isCreatingSample, setIsCreatingSample] = useState<boolean>(false);
+  const [previewPlaying, setPreviewPlaying] = useState<boolean>(false);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const formatTime = (secs: number): string => {
+    const s = Math.max(0, Math.floor(secs));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+  };
 
   // Benchmark Sample Catalog State
   const [samples, setSamples] = useState<BenchmarkSample[]>([
@@ -203,6 +243,147 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
   const handleSelectSample = (sampleId: string) => {
     if (sampleId === activeSampleId) return;
     loadSampleData(sampleId);
+  };
+
+  // Open Create Modal & Fetch Recordings
+  const handleOpenCreateModal = async (preselectedJobId?: string) => {
+    setIsLoadingRecordings(true);
+    setShowCreateModal(true);
+    try {
+      const res = await api.getSourceRecordings();
+      const recs = res.recordings || [];
+      setSourceRecordings(recs);
+
+      let targetRec = recs[0];
+      if (preselectedJobId) {
+        const found = recs.find(r => r.job_id === preselectedJobId);
+        if (found) targetRec = found;
+      }
+
+      if (targetRec) {
+        setSelectedSourceJobId(targetRec.job_id);
+        const start = 0;
+        const end = Math.min(45, Math.floor(targetRec.duration));
+        setNewSampleStart(start);
+        setNewSampleEnd(end);
+        const cleanName = targetRec.filename.replace(/^[a-f0-9]+_/, '');
+        setNewSampleName(`${cleanName} (${formatTime(start)} - ${formatTime(end)})`);
+        setNewSampleDescription(`Benchmark evaluation sample from ${cleanName}.`);
+      }
+    } catch (err: any) {
+      console.error('Failed to load source recordings:', err);
+    } finally {
+      setIsLoadingRecordings(false);
+    }
+  };
+
+  // Preselected Job from Navigation Hook
+  useEffect(() => {
+    if (initialCreateJobId) {
+      handleOpenCreateModal(initialCreateJobId);
+      if (onClearInitialCreateJob) onClearInitialCreateJob();
+    }
+  }, [initialCreateJobId]);
+
+  const handleSelectRecording = (jobId: string) => {
+    setSelectedSourceJobId(jobId);
+    const rec = sourceRecordings.find(r => r.job_id === jobId);
+    if (rec) {
+      const start = 0;
+      const end = Math.min(45, Math.floor(rec.duration));
+      setNewSampleStart(start);
+      setNewSampleEnd(end);
+      const cleanName = rec.filename.replace(/^[a-f0-9]+_/, '');
+      setNewSampleName(`${cleanName} (${formatTime(start)} - ${formatTime(end)})`);
+      setNewSampleDescription(`Benchmark evaluation sample from ${cleanName}.`);
+    }
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      setPreviewPlaying(false);
+    }
+  };
+
+  const handleTogglePreview = () => {
+    if (!previewAudioRef.current) return;
+    if (previewPlaying) {
+      previewAudioRef.current.pause();
+      setPreviewPlaying(false);
+    } else {
+      const url = api.getBenchmarkPreviewUrl(selectedSourceJobId, newSampleStart, newSampleEnd);
+      previewAudioRef.current.src = url;
+      previewAudioRef.current.play().then(() => setPreviewPlaying(true)).catch(() => {});
+    }
+  };
+
+  const handleCreateSampleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSampleName.trim()) {
+      alert('Please enter a sample name.');
+      return;
+    }
+    if (!selectedSourceJobId) {
+      alert('Please select a source recording.');
+      return;
+    }
+    if (newSampleEnd <= newSampleStart) {
+      alert('End time must be greater than start time.');
+      return;
+    }
+
+    setIsCreatingSample(true);
+    try {
+      const res = await api.createBenchmarkSample({
+        name: newSampleName.trim(),
+        source_path_or_id: selectedSourceJobId,
+        start_time: newSampleStart,
+        end_time: newSampleEnd,
+        description: newSampleDescription.trim() || undefined,
+      });
+
+      const samplesRes = await api.getBenchmarkSamples();
+      if (samplesRes.samples) {
+        setSamples(samplesRes.samples);
+      }
+
+      setShowCreateModal(false);
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        setPreviewPlaying(false);
+      }
+
+      await loadSampleData(res.sample.sample_id);
+      showToast(`Benchmark sample "${res.sample.name}" created! Ready for human transcription.`);
+    } catch (err: any) {
+      alert('Failed to create benchmark sample: ' + err.message);
+    } finally {
+      setIsCreatingSample(false);
+    }
+  };
+
+  const handleDeleteSample = async (sampleId: string, sampleName: string) => {
+    if (
+      !confirm(
+        `Are you sure you want to delete benchmark sample "${sampleName}"? All candidate predictions and reference text for this sample will be permanently removed.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await api.deleteBenchmarkSample(sampleId);
+      showToast(`Sample "${sampleName}" deleted.`);
+
+      const samplesRes = await api.getBenchmarkSamples();
+      const updatedSamples = samplesRes.samples || [];
+      setSamples(updatedSamples);
+
+      if (activeSampleId === sampleId) {
+        const nextId = updatedSamples[0]?.sample_id || 'holdout_300_345';
+        loadSampleData(nextId);
+      }
+    } catch (err: any) {
+      alert('Failed to delete sample: ' + err.message);
+    }
   };
 
   const currentResults = resultsBySample[activeSampleId] || [];
@@ -545,8 +726,30 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
         </div>
       </div>
 
+      {/* Benchmark Catalog Header & Add Button */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+        <div>
+          <h2 className="text-base font-bold text-white light:text-surface-900 flex items-center gap-2">
+            <Layers className="h-5 w-5 text-brand-400" />
+            <span>Benchmark Evaluation Samples</span>
+          </h2>
+          <p className="text-xs text-surface-400 light:text-surface-600">
+            Compare models on standardized human-verified intervals or create a custom benchmark from any recording.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => handleOpenCreateModal()}
+          className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 text-white font-bold text-xs shadow-lg shadow-brand-500/20 hover:from-brand-500 hover:to-indigo-500 transition-all hover:scale-[1.02]"
+        >
+          <Plus className="h-4 w-4" />
+          <span>+ Create Benchmark Sample</span>
+        </button>
+      </div>
+
       {/* Benchmark Sample Switcher Tabs */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {samples.map(s => {
           const isSelected = s.sample_id === activeSampleId;
           const isVerified = s.status === 'VERIFIED';
@@ -555,26 +758,41 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
             <div
               key={s.sample_id}
               onClick={() => handleSelectSample(s.sample_id)}
-              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+              className={`p-4 rounded-2xl border cursor-pointer transition-all relative group ${
                 isSelected
                   ? 'border-brand-500/80 bg-brand-500/10 ring-1 ring-brand-500/40 shadow-lg'
                   : 'border-surface-800 bg-surface-900/40 hover:bg-surface-850 hover:border-surface-700'
               }`}
             >
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-bold text-white flex items-center gap-2">
-                  <FileText className={`h-4 w-4 ${isSelected ? 'text-brand-400' : 'text-surface-400'}`} />
-                  <span>{s.name}</span>
+                <span className="text-sm font-bold text-white flex items-center gap-2 max-w-[70%] truncate">
+                  <FileText className={`h-4 w-4 shrink-0 ${isSelected ? 'text-brand-400' : 'text-surface-400'}`} />
+                  <span className="truncate" title={s.name}>{s.name}</span>
                 </span>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide uppercase border ${
-                    isVerified
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                      : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-                  }`}
-                >
-                  {isVerified ? 'VERIFIED' : 'UNVERIFIED'}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide uppercase border ${
+                      isVerified
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                        : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                    }`}
+                  >
+                    {isVerified ? 'VERIFIED' : 'UNVERIFIED'}
+                  </span>
+                  {s.is_dynamic && (
+                    <button
+                      type="button"
+                      onClick={e => {
+                        e.stopPropagation();
+                        handleDeleteSample(s.sample_id, s.name);
+                      }}
+                      className="p-1 rounded-lg text-surface-500 hover:text-rose-400 hover:bg-rose-500/20 transition-colors"
+                      title="Delete dynamic benchmark sample"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
               <p className="text-xs text-surface-400 leading-relaxed mb-3 line-clamp-2">{s.description}</p>
               <div className="flex items-center justify-between text-[11px] font-mono text-surface-400 pt-2 border-t border-surface-800/60">
@@ -1076,6 +1294,236 @@ export const Benchmark: React.FC<BenchmarkProps> = ({ hardware }) => {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Create Benchmark Sample Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-xl rounded-2xl border border-surface-700 bg-surface-900 p-6 shadow-2xl space-y-5 text-white">
+            <div className="flex items-center justify-between border-b border-surface-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-brand-500/20 text-brand-400">
+                  <Plus className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Create Benchmark Sample</h3>
+                  <p className="text-xs text-surface-400">
+                    Extract an audio interval from any uploaded recording for human transcription & evaluation.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateModal(false);
+                  if (previewAudioRef.current) {
+                    previewAudioRef.current.pause();
+                    setPreviewPlaying(false);
+                  }
+                }}
+                className="p-1.5 rounded-lg hover:bg-surface-800 text-surface-400 hover:text-white transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {isLoadingRecordings ? (
+              <div className="py-8 text-center space-y-2">
+                <RefreshCw className="h-6 w-6 animate-spin text-brand-400 mx-auto" />
+                <p className="text-xs text-surface-400">Loading uploaded recordings from history...</p>
+              </div>
+            ) : sourceRecordings.length === 0 ? (
+              <div className="py-8 text-center space-y-2">
+                <AlertTriangle className="h-6 w-6 text-amber-400 mx-auto" />
+                <p className="text-xs text-surface-300">No completed recordings found in History.</p>
+                <p className="text-[11px] text-surface-500">Please upload and transcribe an audio recording first.</p>
+              </div>
+            ) : (
+              <form onSubmit={handleCreateSampleSubmit} className="space-y-4">
+                {/* Source Recording Dropdown */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-surface-300 block">Source Recording:</label>
+                  <select
+                    value={selectedSourceJobId}
+                    onChange={e => handleSelectRecording(e.target.value)}
+                    className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:outline-none focus:border-brand-500"
+                  >
+                    {sourceRecordings.map(rec => (
+                      <option key={rec.job_id} value={rec.job_id}>
+                        {rec.filename.replace(/^[a-f0-9]+_/, '')} ({rec.duration_formatted}) • {new Date(rec.created_at).toLocaleDateString()}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Interval Boundaries */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-surface-300 block">Start Timestamp (seconds):</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      value={newSampleStart}
+                      onChange={e => {
+                        const val = Math.max(0, parseFloat(e.target.value) || 0);
+                        setNewSampleStart(val);
+                        const rec = sourceRecordings.find(r => r.job_id === selectedSourceJobId);
+                        if (rec) {
+                          const cleanName = rec.filename.replace(/^[a-f0-9]+_/, '');
+                          setNewSampleName(`${cleanName} (${formatTime(val)} - ${formatTime(newSampleEnd)})`);
+                        }
+                      }}
+                      className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:outline-none focus:border-brand-500 font-mono"
+                    />
+                    <span className="text-[10px] text-surface-400 font-mono">{formatTime(newSampleStart)}</span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-surface-300 block">End Timestamp (seconds):</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min={newSampleStart + 1}
+                      value={newSampleEnd}
+                      onChange={e => {
+                        const val = Math.max(newSampleStart + 0.5, parseFloat(e.target.value) || 0);
+                        setNewSampleEnd(val);
+                        const rec = sourceRecordings.find(r => r.job_id === selectedSourceJobId);
+                        if (rec) {
+                          const cleanName = rec.filename.replace(/^[a-f0-9]+_/, '');
+                          setNewSampleName(`${cleanName} (${formatTime(newSampleStart)} - ${formatTime(val)})`);
+                        }
+                      }}
+                      className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:outline-none focus:border-brand-500 font-mono"
+                    />
+                    <span className="text-[10px] text-surface-400 font-mono">{formatTime(newSampleEnd)}</span>
+                  </div>
+                </div>
+
+                {/* Duration Badge & Presets */}
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-surface-950 border border-surface-800">
+                  <div className="flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-brand-400" />
+                    <span className="text-xs text-surface-300">Selected Interval Duration:</span>
+                    <span className="px-2 py-0.5 rounded-md bg-brand-500/20 text-brand-300 font-mono text-xs font-bold">
+                      {Math.max(0, newSampleEnd - newSampleStart).toFixed(1)}s
+                    </span>
+                  </div>
+
+                  {/* Interval Presets */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-surface-500 mr-1">Presets:</span>
+                    {[30, 45, 60].map(dur => (
+                      <button
+                        key={dur}
+                        type="button"
+                        onClick={() => {
+                          const rec = sourceRecordings.find(r => r.job_id === selectedSourceJobId);
+                          const maxDur = rec?.duration || 300;
+                          const newEnd = Math.min(maxDur, newSampleStart + dur);
+                          setNewSampleEnd(newEnd);
+                          if (rec) {
+                            const cleanName = rec.filename.replace(/^[a-f0-9]+_/, '');
+                            setNewSampleName(`${cleanName} (${formatTime(newSampleStart)} - ${formatTime(newEnd)})`);
+                          }
+                        }}
+                        className="px-2 py-1 rounded-lg border border-surface-700 bg-surface-850 hover:bg-surface-750 text-[10px] font-semibold text-surface-300 transition-colors"
+                      >
+                        +{dur}s
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Audio Preview Card */}
+                <div className="p-3 rounded-xl bg-surface-950 border border-surface-800 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Volume2 className="h-4 w-4 text-emerald-400" />
+                    <div className="text-left">
+                      <span className="text-xs font-semibold text-white block">Preview Interval Audio</span>
+                      <span className="text-[10px] text-surface-400">Listen to verify speaker voices and boundaries before saving</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTogglePreview}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors shadow-md"
+                  >
+                    {previewPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                    <span>{previewPlaying ? 'Pause' : 'Listen Preview'}</span>
+                  </button>
+                </div>
+
+                {/* Hidden Audio Tag for Modal Preview */}
+                <audio
+                  ref={previewAudioRef}
+                  onEnded={() => setPreviewPlaying(false)}
+                  onError={() => setPreviewPlaying(false)}
+                />
+
+                {/* Sample Name Input */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-surface-300 block">Sample Display Name:</label>
+                  <input
+                    type="text"
+                    value={newSampleName}
+                    onChange={e => setNewSampleName(e.target.value)}
+                    placeholder="e.g., new dd.ogg (00:30 - 01:15)"
+                    className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:outline-none focus:border-brand-500"
+                    required
+                  />
+                </div>
+
+                {/* Sample Description */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-surface-300 block">Description & Research Notes (Optional):</label>
+                  <input
+                    type="text"
+                    value={newSampleDescription}
+                    onChange={e => setNewSampleDescription(e.target.value)}
+                    placeholder="e.g., Technical team sync with fast Egyptian colloquial Arabic and English terms"
+                    className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2 text-xs text-white focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+
+                {/* Modal Action Buttons */}
+                <div className="flex items-center justify-end gap-3 pt-3 border-t border-surface-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCreateModal(false);
+                      if (previewAudioRef.current) {
+                        previewAudioRef.current.pause();
+                        setPreviewPlaying(false);
+                      }
+                    }}
+                    className="px-4 py-2 rounded-xl border border-surface-700 bg-surface-800 hover:bg-surface-700 text-xs font-semibold text-surface-300 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isCreatingSample}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs transition-colors shadow-lg shadow-brand-500/20 disabled:opacity-50"
+                  >
+                    {isCreatingSample ? (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>Extracting & Creating Sample...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="h-3.5 w-3.5" />
+                        <span>Create Benchmark Sample</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
         </div>
       )}
     </div>

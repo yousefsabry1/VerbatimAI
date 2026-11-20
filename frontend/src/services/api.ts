@@ -235,6 +235,56 @@ export const api = {
     return res.json();
   },
 
+  async getSourceRecordings(): Promise<{
+    recordings: Array<{
+      job_id: string;
+      filename: string;
+      path: string;
+      duration: number;
+      duration_formatted: string;
+      format: string;
+      created_at: string;
+    }>;
+  }> {
+    const res = await fetch(`${API_BASE}/benchmark/source-recordings`);
+    if (!res.ok) throw new Error('Failed to fetch source recordings');
+    return res.json();
+  },
+
+  getBenchmarkPreviewUrl(sourcePathOrId: string, startTime: number, endTime: number): string {
+    return `${API_BASE}/benchmark/preview-source?source_path_or_id=${encodeURIComponent(sourcePathOrId)}&start_time=${startTime}&end_time=${endTime}`;
+  },
+
+  async createBenchmarkSample(params: {
+    name: string;
+    source_path_or_id: string;
+    start_time: number;
+    end_time: number;
+    description?: string;
+  }): Promise<{ status: string; sample: any }> {
+    const res = await fetch(`${API_BASE}/benchmark/sample`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to create benchmark sample' }));
+      throw new Error(err.detail || 'Failed to create benchmark sample');
+    }
+    return res.json();
+  },
+
+  async deleteBenchmarkSample(sampleId: string): Promise<{ status: string; sample_id: string }> {
+    const res = await fetch(`${API_BASE}/benchmark/sample/${encodeURIComponent(sampleId)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to delete benchmark sample' }));
+      throw new Error(err.detail || 'Failed to delete benchmark sample');
+    }
+    return res.json();
+  },
+
   getBenchmarkAudioUrl(sampleId: string): string {
     return `${API_BASE}/benchmark/audio/${sampleId}`;
   },

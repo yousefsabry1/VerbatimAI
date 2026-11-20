@@ -30,6 +30,16 @@ SUPPORTED_MODELS = {
         "approx_download_gb": 0.78,
         "recommended_for": "Fine-tuned specifically for Egyptian colloquial Arabic mixed with English technical terms",
     },
+    "codeswitched-medium-recovery": {
+        "id": "codeswitched-medium-recovery",
+        "name": "Egyptian Arabic Specialized (Recovery Mode)",
+        "repo": "Seif-Eldeen-Sameh/whisper-medium-arabic-codeswitched-ct2",
+        "approx_vram_gb": 3.0,
+        "approx_download_gb": 0.78,
+        "recommended_for": "Specialized Whisper with boundary de-duplication and isolated conditioning (prev_text=False)",
+        "is_experimental": True,
+        "benchmark_only": True,
+    },
     "small": {
         "id": "small",
         "name": "Fast — small",

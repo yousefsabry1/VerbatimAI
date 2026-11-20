@@ -110,6 +110,32 @@ def init_db():
     );
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS benchmark_samples (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        source_job_id TEXT,
+        source_filename TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        start_time REAL NOT NULL,
+        end_time REAL NOT NULL,
+        duration REAL NOT NULL,
+        audio_file_path TEXT NOT NULL,
+        ref_file_path TEXT NOT NULL,
+        results_file_path TEXT NOT NULL,
+        meta_file_path TEXT NOT NULL,
+        is_verified INTEGER DEFAULT 0,
+        description TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """)
+
+    try:
+        cursor.execute("ALTER TABLE benchmark_samples ADD COLUMN is_verified INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
     logger.info("Database initialized successfully at %s", DB_PATH)
@@ -558,4 +584,123 @@ def delete_understanding_brief(job_id: str) -> bool:
     conn.commit()
     conn.close()
     return deleted
+
+
+# Benchmark Sample CRUD helpers
+def create_benchmark_sample(sample_data: Dict[str, Any]) -> str:
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cursor.execute("""
+    INSERT INTO benchmark_samples (
+        id, name, source_job_id, source_filename, source_path,
+        start_time, end_time, duration,
+        audio_file_path, ref_file_path, results_file_path, meta_file_path,
+        description, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        sample_data["id"],
+        sample_data["name"],
+        sample_data.get("source_job_id"),
+        sample_data["source_filename"],
+        sample_data["source_path"],
+        float(sample_data["start_time"]),
+        float(sample_data["end_time"]),
+        float(sample_data["duration"]),
+        sample_data["audio_file_path"],
+        sample_data["ref_file_path"],
+        sample_data["results_file_path"],
+        sample_data["meta_file_path"],
+        sample_data.get("description", ""),
+        now,
+        now,
+    ))
+    conn.commit()
+    conn.close()
+    return sample_data["id"]
+
+
+def get_benchmark_sample(sample_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM benchmark_samples WHERE id = ?", (sample_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_benchmark_samples() -> List[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM benchmark_samples ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_benchmark_sample(sample_id: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM benchmark_samples WHERE id = ?", (sample_id,))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def update_benchmark_sample_verification(sample_id: str, is_verified: bool) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cursor.execute(
+        "UPDATE benchmark_samples SET is_verified = ?, updated_at = ? WHERE id = ?",
+        (1 if is_verified else 0, now, sample_id)
+    )
+    updated = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def list_source_recordings() -> List[Dict[str, Any]]:
+    """
+    Returns distinct completed audio recordings available for creating benchmark samples.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, input_filename, input_path, input_duration, input_format, created_at
+    FROM jobs
+    WHERE status = 'completed' AND input_duration > 0
+    ORDER BY created_at DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    recordings = []
+    seen_paths = set()
+    for r in rows:
+        d = dict(r)
+        p = d.get("input_path", "")
+        if p and p not in seen_paths:
+            file_path = Path(p)
+            try:
+                if not file_path.is_file() or file_path.stat().st_size < 1024:
+                    continue
+            except Exception:
+                continue
+            seen_paths.add(p)
+            dur = d.get("input_duration", 0.0)
+            mins = int(dur // 60)
+            secs = int(dur % 60)
+            recordings.append({
+                "job_id": d["id"],
+                "filename": d["input_filename"],
+                "path": p,
+                "duration": dur,
+                "duration_formatted": f"{mins:02d}:{secs % 60:02d}",
+                "format": d.get("input_format", ""),
+                "created_at": d["created_at"],
+            })
+    return recordings
 

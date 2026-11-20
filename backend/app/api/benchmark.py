@@ -1,21 +1,33 @@
 import os
 import json
 import time
+import uuid
 import hashlib
+import logging
 import subprocess
 import mimetypes
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.core.config import STORAGE_DIR, DEFAULT_VOCAB_HINTS, SUPPORTED_MODELS
-from app.audio.metadata_extractor import find_ffmpeg
+from app.audio.metadata_extractor import find_ffmpeg, extract_metadata
 from app.transcription.engine import run_transcription_pipeline, is_model_downloaded
 from app.evaluation.metrics import calculate_wer_cer, normalize_arabic_english, normalize_raw
 from app.api.audio import resolve_file
+from app.core.database import (
+    create_benchmark_sample,
+    get_benchmark_sample,
+    list_benchmark_samples,
+    delete_benchmark_sample,
+    update_benchmark_sample_verification,
+    list_source_recordings,
+    get_job,
+)
 
+logger = logging.getLogger("verbatim.benchmark")
 router = APIRouter(prefix="/api/benchmark", tags=["benchmark"])
 
 BENCHMARK_DIR = STORAGE_DIR / "benchmarks"
@@ -76,6 +88,14 @@ class LiveAlignRequest(BaseModel):
     reference_text: str
     hypothesis_text: str
     eval_mode: str = "normalized"
+
+
+class CreateSampleRequest(BaseModel):
+    name: str
+    source_path_or_id: str
+    start_time: float
+    end_time: float
+    description: Optional[str] = None
 
 
 def _find_source_audio() -> Path:
@@ -153,6 +173,49 @@ def _ensure_eval_400_445_slice():
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
 
+def _resolve_benchmark_source_audio(source_path_or_id: str) -> Tuple[Path, Optional[str], Optional[str]]:
+    """
+    Resolves source audio for benchmark sample creation.
+    Returns: (resolved_path, source_job_id, source_filename)
+    """
+    clean_id = source_path_or_id.strip()
+
+    # 1. Try resolving via get_job
+    try:
+        job = get_job(clean_id)
+        if job and job.get("input_path"):
+            p = Path(job["input_path"])
+            if p.is_file():
+                return p, job["id"], job.get("input_filename", p.name)
+    except Exception:
+        pass
+
+    # 2. Try resolve_file from audio api
+    try:
+        resolved = resolve_file(clean_id)
+        if resolved.is_file():
+            return resolved, None, resolved.name
+    except Exception:
+        pass
+
+    # 3. Direct path check
+    cand = Path(clean_id)
+    if cand.is_file():
+        return cand.resolve(), None, cand.name
+
+    # 4. Search in uploads and workspace
+    for search_dir in [STORAGE_DIR / "uploads", Path("."), Path("..")]:
+        direct = search_dir / clean_id
+        if direct.is_file():
+            return direct.resolve(), None, direct.name
+        for matched in search_dir.glob(f"*{clean_id}*"):
+            if matched.is_file():
+                return matched.resolve(), None, matched.name
+
+    raise HTTPException(status_code=404, detail=f"Source recording '{source_path_or_id}' could not be resolved.")
+
+
+# Canonical static baseline sample configurations
 SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
     "dev_0_103": {
         "sample_id": "dev_0_103",
@@ -166,6 +229,7 @@ SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "meta_file": DEV_META_FILE,
         "ensure_fn": _ensure_dev_slice,
         "default_verified": True,
+        "is_dynamic": False,
         "description": "Original human ground-truth transcript provided by the user. Baseline: 52.71% Normalized WER.",
     },
     "test_180_225": {
@@ -180,6 +244,7 @@ SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "meta_file": TEST_META_FILE,
         "ensure_fn": _ensure_test_slice,
         "default_verified": True,
+        "is_dynamic": False,
         "description": "Independent 45s out-of-sample audio interval. Personally transcribed by the user from original audio.",
     },
     "holdout_300_345": {
@@ -194,6 +259,7 @@ SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "meta_file": HOLDOUT_META_FILE,
         "ensure_fn": _ensure_holdout_slice,
         "default_verified": False,
+        "is_dynamic": False,
         "description": "Strict unseen out-of-sample holdout audio interval (05:00 - 05:45). Reference manually transcribed by user.",
     },
     "eval_400_445": {
@@ -208,9 +274,67 @@ SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "meta_file": EVAL_400_445_META_FILE,
         "ensure_fn": _ensure_eval_400_445_slice,
         "default_verified": False,
+        "is_dynamic": False,
         "description": "New independent untouched holdout interval (06:40 - 07:25). Reference left empty for human verification. Never contains synthetic ground truth.",
     },
 }
+
+STATIC_SAMPLE_CONFIGS = SAMPLE_CONFIGS
+
+
+def get_sample_config(sample_id: str) -> Dict[str, Any]:
+    if sample_id in SAMPLE_CONFIGS:
+        return SAMPLE_CONFIGS[sample_id]
+
+    sample = get_benchmark_sample(sample_id)
+    if not sample:
+        raise HTTPException(status_code=404, detail=f"Unknown benchmark sample '{sample_id}'.")
+
+    return {
+        "sample_id": sample["id"],
+        "name": sample["name"],
+        "source_job_id": sample.get("source_job_id"),
+        "source_filename": sample.get("source_filename"),
+        "start_time": float(sample["start_time"]),
+        "end_time": float(sample["end_time"]),
+        "duration": float(sample["duration"]),
+        "ref_file": Path(sample["ref_file_path"]),
+        "audio_file": Path(sample["audio_file_path"]),
+        "results_file": Path(sample["results_file_path"]),
+        "meta_file": Path(sample["meta_file_path"]),
+        "ensure_fn": lambda: None,
+        "default_verified": False,
+        "is_dynamic": True,
+        "description": sample.get("description") or f"Dynamic benchmark sample from {sample.get('source_filename', 'recording')} ({sample['start_time']:.1f}s - {sample['end_time']:.1f}s).",
+    }
+
+
+def get_all_sample_configs() -> Dict[str, Dict[str, Any]]:
+    configs = dict(SAMPLE_CONFIGS)
+    try:
+        db_samples = list_benchmark_samples()
+        for sample in db_samples:
+            s_id = sample["id"]
+            configs[s_id] = {
+                "sample_id": s_id,
+                "name": sample["name"],
+                "source_job_id": sample.get("source_job_id"),
+                "source_filename": sample.get("source_filename"),
+                "start_time": float(sample["start_time"]),
+                "end_time": float(sample["end_time"]),
+                "duration": float(sample["duration"]),
+                "ref_file": Path(sample["ref_file_path"]),
+                "audio_file": Path(sample["audio_file_path"]),
+                "results_file": Path(sample["results_file_path"]),
+                "meta_file": Path(sample["meta_file_path"]),
+                "ensure_fn": lambda: None,
+                "default_verified": False,
+                "is_dynamic": True,
+                "description": sample.get("description") or f"Dynamic benchmark sample from {sample.get('source_filename', 'recording')} ({sample['start_time']:.1f}s - {sample['end_time']:.1f}s).",
+            }
+    except Exception as e:
+        logger.error("Failed to load dynamic benchmark samples: %s", e)
+    return configs
 
 
 @router.get("/samples")
@@ -219,7 +343,8 @@ def get_benchmark_samples():
     Returns the catalog of registered benchmark evaluation intervals with their canonical metadata.
     """
     catalog = []
-    for s_id, cfg in SAMPLE_CONFIGS.items():
+    configs = get_all_sample_configs()
+    for s_id, cfg in configs.items():
         cfg["ensure_fn"]()
         raw_text = ""
         if cfg["ref_file"].exists():
@@ -245,6 +370,7 @@ def get_benchmark_samples():
         catalog.append({
             "sample_id": s_id,
             "name": cfg["name"],
+            "source_filename": cfg.get("source_filename"),
             "start_time": cfg["start_time"],
             "end_time": cfg["end_time"],
             "duration": cfg["duration"],
@@ -254,6 +380,7 @@ def get_benchmark_samples():
             "has_human_reference": word_count > 0,
             "is_human_verified": is_verified,
             "word_count": word_count,
+            "is_dynamic": bool(cfg.get("is_dynamic", False)),
             "description": cfg["description"],
         })
 
@@ -267,23 +394,234 @@ def get_benchmark_samples():
     }
 
 
+@router.get("/source-recordings")
+def get_benchmark_source_recordings():
+    """
+    Returns available source recordings from History to create benchmark samples.
+    """
+    recordings = list_source_recordings()
+    return {"recordings": recordings}
+
+
+@router.get("/preview-source")
+def preview_source_interval(
+    source_path_or_id: str = Query(...),
+    start_time: float = Query(...),
+    end_time: float = Query(...),
+):
+    """
+    Extracts and streams a temporary preview slice from any recording to listen before creating a benchmark sample.
+    """
+    source_path, _, _ = _resolve_benchmark_source_audio(source_path_or_id)
+    if start_time < 0:
+        start_time = 0.0
+    if end_time <= start_time:
+        raise HTTPException(status_code=400, detail="End time must be greater than start time.")
+    if (end_time - start_time) > 180.0:
+        end_time = start_time + 180.0
+
+    preview_dir = BENCHMARK_DIR / "previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    hash_str = hashlib.md5(f"{source_path}_{start_time:.2f}_{end_time:.2f}".encode()).hexdigest()[:16]
+    preview_file = preview_dir / f"prev_{hash_str}.wav"
+
+    if not preview_file.exists() or preview_file.stat().st_size == 0:
+        ffmpeg = find_ffmpeg()
+        cmd = [
+            ffmpeg, "-y",
+            "-ss", str(start_time),
+            "-to", str(end_time),
+            "-i", str(source_path),
+            "-vn", "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_s16le",
+            str(preview_file),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode != 0 or not preview_file.exists():
+            raise HTTPException(status_code=500, detail="Failed to extract audio preview.")
+
+    return FileResponse(
+        path=preview_file,
+        media_type="audio/wav",
+        filename=f"preview_{start_time:.0f}_{end_time:.0f}.wav",
+        headers={"Accept-Ranges": "bytes"}
+    )
+
+
+@router.post("/sample")
+def create_sample(req: CreateSampleRequest):
+    """
+    Creates a new dynamic benchmark evaluation sample from any uploaded recording.
+    Extracts an isolated 16kHz mono WAV slice to prevent deletion on temporary upload cleanup.
+    """
+    clean_name = req.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Sample name is required.")
+
+    source_path, source_job_id, source_filename = _resolve_benchmark_source_audio(req.source_path_or_id)
+
+    # Validate audio with extract_metadata
+    meta = extract_metadata(source_path)
+    if not meta.get("is_valid_audio"):
+        raise HTTPException(status_code=400, detail=f"Source file is not a valid audio recording: {meta.get('error')}")
+
+    total_duration = meta.get("duration", 0.0)
+    if total_duration <= 0:
+        raise HTTPException(status_code=400, detail="Cannot determine duration of source audio.")
+
+    start_t = round(float(req.start_time), 2)
+    end_t = round(float(req.end_time), 2)
+
+    if start_t < 0:
+        raise HTTPException(status_code=400, detail="Start time must be >= 0.0s.")
+    if end_t <= start_t:
+        raise HTTPException(status_code=400, detail=f"End time ({end_t}s) must be greater than start time ({start_t}s).")
+    if end_t > (total_duration + 1.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"End time ({end_t:.1f}s) exceeds total recording duration ({total_duration:.1f}s)."
+        )
+
+    interval_duration = round(min(end_t, total_duration) - start_t, 2)
+    if interval_duration < 2.0:
+        raise HTTPException(status_code=400, detail="Evaluation interval must be at least 2.0 seconds.")
+    if interval_duration > 600.0:
+        raise HTTPException(status_code=400, detail="Evaluation interval cannot exceed 10 minutes.")
+
+    # Unique sample ID
+    sample_id = f"sample_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+
+    # Target files
+    target_audio = BENCHMARK_DIR / f"{sample_id}.wav"
+    ref_file = BENCHMARK_DIR / f"{sample_id}_ref.txt"
+    meta_file = BENCHMARK_DIR / f"{sample_id}_meta.json"
+    results_file = BENCHMARK_DIR / f"{sample_id}_results.json"
+
+    # Extract isolated 16kHz mono 16-bit PCM WAV slice
+    ffmpeg = find_ffmpeg()
+    cmd = [
+        ffmpeg, "-y",
+        "-ss", str(start_t),
+        "-to", str(end_t),
+        "-i", str(source_path),
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        str(target_audio),
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if res.returncode != 0 or not target_audio.exists() or target_audio.stat().st_size == 0:
+        err = res.stderr.decode("utf-8", errors="replace")[-300:]
+        raise HTTPException(status_code=500, detail=f"FFmpeg audio extraction failed: {err}")
+
+    # Initialize empty reference (never copy ASR predictions)
+    ref_file.write_text("", encoding="utf-8")
+
+    # Initialize meta file
+    sample_meta = {
+        "sample_id": sample_id,
+        "sample_name": clean_name,
+        "source_job_id": source_job_id,
+        "source_filename": source_filename,
+        "source_path": str(source_path),
+        "start_time": start_t,
+        "end_time": end_t,
+        "duration": interval_duration,
+        "is_human_verified": False,
+        "verification_status": "NO_REFERENCE",
+        "verification_statement": None,
+        "verification_timestamp": None,
+        "verification_method": None,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "word_count": 0,
+        "revisions": [],
+    }
+    meta_file.write_text(json.dumps(sample_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Initialize empty results
+    results_file.write_text("[]", encoding="utf-8")
+
+    # Insert into database
+    create_benchmark_sample({
+        "id": sample_id,
+        "name": clean_name,
+        "source_job_id": source_job_id,
+        "source_filename": source_filename,
+        "source_path": str(source_path),
+        "start_time": start_t,
+        "end_time": end_t,
+        "duration": interval_duration,
+        "audio_file_path": str(target_audio),
+        "ref_file_path": str(ref_file),
+        "results_file_path": str(results_file),
+        "meta_file_path": str(meta_file),
+        "description": req.description or f"Dynamic benchmark sample from {source_filename} ({start_t:.1f}s - {end_t:.1f}s).",
+    })
+
+    return {
+        "status": "created",
+        "sample": {
+            "sample_id": sample_id,
+            "name": clean_name,
+            "source_filename": source_filename,
+            "start_time": start_t,
+            "end_time": end_t,
+            "duration": interval_duration,
+            "audio_url": f"/api/benchmark/audio/{sample_id}",
+            "status": "UNVERIFIED",
+            "verification_badge": "UNVERIFIED — Pending Human Transcription",
+            "has_human_reference": False,
+            "is_human_verified": False,
+            "word_count": 0,
+            "is_dynamic": True,
+            "description": req.description or f"Dynamic benchmark sample from {source_filename} ({start_t:.1f}s - {end_t:.1f}s).",
+        }
+    }
+
+
+@router.delete("/sample/{sample_id}")
+def delete_sample(sample_id: str):
+    """
+    Deletes a dynamic benchmark sample and its isolated audio/reference files.
+    Predefined baseline samples cannot be deleted.
+    """
+    if sample_id in SAMPLE_CONFIGS:
+        raise HTTPException(status_code=400, detail="Cannot delete predefined benchmark sample.")
+
+    sample = get_benchmark_sample(sample_id)
+    if not sample:
+        raise HTTPException(status_code=404, detail=f"Benchmark sample '{sample_id}' not found.")
+
+    for p_key in ["audio_file_path", "ref_file_path", "results_file_path", "meta_file_path"]:
+        path_str = sample.get(p_key)
+        if path_str:
+            Path(path_str).unlink(missing_ok=True)
+
+    delete_benchmark_sample(sample_id)
+    return {"status": "deleted", "sample_id": sample_id}
+
+
 @router.get("/audio/{sample_id}")
 def stream_benchmark_audio(sample_id: str):
     """
     Streams audio for the requested benchmark sample with byte-range support.
     """
-    if sample_id in SAMPLE_CONFIGS:
-        cfg = SAMPLE_CONFIGS[sample_id]
-        cfg["ensure_fn"]()
-        target = cfg["audio_file"]
-    elif sample_id == "full":
+    if sample_id == "full":
         target = _find_source_audio()
     else:
-        p = BENCHMARK_DIR / sample_id
-        if p.is_file():
-            target = p
-        else:
-            raise HTTPException(status_code=404, detail=f"Benchmark audio '{sample_id}' not found.")
+        try:
+            cfg = get_sample_config(sample_id)
+            cfg["ensure_fn"]()
+            target = cfg["audio_file"]
+        except Exception:
+            p = BENCHMARK_DIR / sample_id
+            if p.is_file():
+                target = p
+            else:
+                raise HTTPException(status_code=404, detail=f"Benchmark audio '{sample_id}' not found.")
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Benchmark audio file for '{sample_id}' does not exist on disk.")
 
     mime = "audio/wav" if target.suffix.lower() == ".wav" else "audio/ogg"
     return FileResponse(
@@ -299,10 +637,7 @@ def get_reference(sample_id: str = Query("dev_0_103")):
     """
     Retrieves the reference transcript, revision hash, and verification metadata for a benchmark sample.
     """
-    if sample_id not in SAMPLE_CONFIGS:
-        raise HTTPException(status_code=404, detail=f"Unknown sample ID '{sample_id}'.")
-
-    cfg = SAMPLE_CONFIGS[sample_id]
+    cfg = get_sample_config(sample_id)
     cfg["ensure_fn"]()
 
     raw_text = ""
@@ -341,6 +676,7 @@ def get_reference(sample_id: str = Query("dev_0_103")):
     return {
         "sample_id": sample_id,
         "sample_name": cfg["name"],
+        "source_filename": cfg.get("source_filename"),
         "has_reference": word_count_raw > 0,
         "is_human_verified": is_verified,
         "verification_status": v_status,
@@ -365,10 +701,7 @@ def save_reference(req: ReferenceUpdateRequest):
     """
     Saves a reference transcript. Supports saving as unverified draft or certifying as human-verified.
     """
-    if req.sample_id not in SAMPLE_CONFIGS:
-        raise HTTPException(status_code=404, detail=f"Unknown sample ID '{req.sample_id}'.")
-
-    cfg = SAMPLE_CONFIGS[req.sample_id]
+    cfg = get_sample_config(req.sample_id)
     cleaned_text = req.reference_text.strip()
     if not cleaned_text:
         raise HTTPException(status_code=400, detail="Reference text cannot be empty.")
@@ -432,6 +765,11 @@ def save_reference(req: ReferenceUpdateRequest):
         "revisions": revisions[-10:],
     }
     cfg["meta_file"].write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    if cfg.get("is_dynamic"):
+        try:
+            update_benchmark_sample_verification(req.sample_id, is_verified)
+        except Exception as e:
+            logger.warning("Could not update verification status in DB for %s: %s", req.sample_id, e)
 
     # Invalidate or auto-evaluate cached predictions in results_file
     if cfg["results_file"].exists():
@@ -500,10 +838,7 @@ def calculate_benchmark_accuracy(req: CalculateAccuracyRequest):
     """
     Evaluates existing candidate model predictions against the certified human reference without re-running models.
     """
-    if req.sample_id not in SAMPLE_CONFIGS:
-        raise HTTPException(status_code=404, detail=f"Unknown sample ID '{req.sample_id}'.")
-
-    cfg = SAMPLE_CONFIGS[req.sample_id]
+    cfg = get_sample_config(req.sample_id)
     if not cfg["ref_file"].exists():
         raise HTTPException(status_code=400, detail="Cannot calculate accuracy: No reference text found.")
 
@@ -580,10 +915,12 @@ def get_latest_results(sample_id: str = Query("dev_0_103")):
     """
     Returns latest benchmark results for the requested sample with verified sample identity.
     """
-    if sample_id not in SAMPLE_CONFIGS:
+    try:
+        cfg = get_sample_config(sample_id)
+    except Exception:
         sample_id = "dev_0_103"
+        cfg = get_sample_config(sample_id)
 
-    cfg = SAMPLE_CONFIGS[sample_id]
     target_results_file = cfg["results_file"]
 
     is_verified = cfg["default_verified"]
@@ -674,16 +1011,19 @@ def run_benchmark(req: BenchmarkRunRequest):
     Executes benchmark comparison on requested models.
     If reference is unverified, transcribes for review without reporting fabricated accuracy metrics.
     """
-    if req.sample_id in SAMPLE_CONFIGS:
+    configs = get_all_sample_configs()
+    if req.sample_id in configs:
         current_sample_id = req.sample_id
     elif abs(req.start_time - 300.0) < 1.0:
         current_sample_id = "holdout_300_345"
     elif abs(req.start_time - 180.0) < 1.0:
         current_sample_id = "test_180_225"
+    elif abs(req.start_time - 400.0) < 1.0:
+        current_sample_id = "eval_400_445"
     else:
         current_sample_id = "dev_0_103"
 
-    cfg = SAMPLE_CONFIGS[current_sample_id]
+    cfg = get_sample_config(current_sample_id)
     cfg["ensure_fn"]()
 
     ref_data = get_reference(current_sample_id)
@@ -745,6 +1085,29 @@ def run_benchmark(req: BenchmarkRunRequest):
                 dev_transitions = []
                 rep_detected = 0
                 rep_resolved = 0
+            elif model_id == "codeswitched-medium-recovery":
+                res = run_transcription_pipeline(
+                    input_path=active_audio,
+                    job_id=job_id,
+                    model_id="codeswitched-medium",
+                    language="ar",
+                    device_mode=req.device_mode,
+                    compute_mode="auto",
+                    accuracy_mode="recovery",
+                    verbatim_mode="strict",
+                    enhance_audio=False,
+                    vad_filter=req.vad_filter,
+                    vocabulary_hints=hints,
+                )
+                elapsed = time.time() - t0
+                pred_text = res["clean_text"]
+                meta = res["metadata"]
+                device_used = meta.get("device_used")
+                compute_used = meta.get("compute_used")
+                cuda_fallback = meta.get("cuda_fallback", False)
+                dev_transitions = meta.get("device_transitions", [])
+                rep_detected = meta.get("repetition_loops_detected", 0)
+                rep_resolved = meta.get("repetition_loops_resolved", 0)
             else:
                 res = run_transcription_pipeline(
                     input_path=active_audio,

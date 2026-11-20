@@ -38,6 +38,12 @@ const AppContent: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>(initialTab);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [selectedReviewJobId, setSelectedReviewJobId] = useState<string | null>(initialJob);
+  const [benchmarkInitialJobId, setBenchmarkInitialJobId] = useState<string | null>(null);
+
+  const handleNavigateToBenchmark = (jobId?: string) => {
+    setBenchmarkInitialJobId(jobId || null);
+    setActiveTab('benchmark');
+  };
 
   useEffect(() => {
     api.getHardware().then(setHardware).catch(console.error);
@@ -108,12 +114,21 @@ const AppContent: React.FC = () => {
           />
         )}
 
-        {activeTab === 'benchmark' && <Benchmark hardware={hardware} />}
+        {activeTab === 'benchmark' && (
+          <Benchmark
+            hardware={hardware}
+            initialCreateJobId={benchmarkInitialJobId}
+            onClearInitialCreateJob={() => setBenchmarkInitialJobId(null)}
+          />
+        )}
 
         {activeTab === 'converter' && <AudioConverter />}
 
         {activeTab === 'history' && (
-          <History onOpenTranscript={handleSelectJobForReview} />
+          <History
+            onOpenTranscript={handleSelectJobForReview}
+            onCreateBenchmarkSample={handleNavigateToBenchmark}
+          />
         )}
 
         {activeTab === 'settings' && <Settings hardware={hardware} />}

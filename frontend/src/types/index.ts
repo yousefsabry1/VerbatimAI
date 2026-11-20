@@ -150,6 +150,7 @@ export interface BenchmarkRunResult {
 export interface BenchmarkSample {
   sample_id: string;
   name: string;
+  source_filename?: string;
   start_time: number;
   end_time: number;
   duration: number;
@@ -159,6 +160,7 @@ export interface BenchmarkSample {
   has_human_reference: boolean;
   is_human_verified?: boolean;
   word_count: number;
+  is_dynamic?: boolean;
   description: string;
 }
 

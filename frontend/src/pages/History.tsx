@@ -14,13 +14,15 @@ import {
   XCircle,
   Clock,
   Filter,
+  BarChart3,
 } from 'lucide-react';
 
 interface HistoryProps {
   onOpenTranscript: (jobId: string) => void;
+  onCreateBenchmarkSample?: (jobId: string) => void;
 }
 
-export const History: React.FC<HistoryProps> = ({ onOpenTranscript }) => {
+export const History: React.FC<HistoryProps> = ({ onOpenTranscript, onCreateBenchmarkSample }) => {
   const { t } = useI18n();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [filterType, setFilterType] = useState<string>('all');
@@ -229,6 +231,17 @@ export const History: React.FC<HistoryProps> = ({ onOpenTranscript }) => {
                     </td>
 
                     <td className="py-3.5 px-4 text-right rtl:text-left space-x-2 rtl:space-x-reverse">
+                      {onCreateBenchmarkSample && job.status === 'completed' && job.input_duration && job.input_duration > 0 && (
+                        <button
+                          onClick={() => onCreateBenchmarkSample(job.id)}
+                          className="text-amber-400 hover:text-amber-300 font-semibold inline-flex items-center gap-1 text-xs"
+                          title="Create benchmark evaluation sample from this recording"
+                        >
+                          <BarChart3 className="h-3.5 w-3.5" />
+                          <span>Benchmark</span>
+                        </button>
+                      )}
+
                       {job.job_type === 'transcription' && job.status === 'completed' && (
                         <button
                           onClick={() => onOpenTranscript(job.id)}

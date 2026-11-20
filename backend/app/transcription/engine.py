@@ -41,10 +41,14 @@ def sanitize_name(name: str) -> str:
 
 
 def get_model_dir(model_id: str) -> Path:
+    if model_id == "codeswitched-medium-recovery":
+        return MODELS_DIR / sanitize_name("codeswitched-medium")
     return MODELS_DIR / sanitize_name(model_id)
 
 
 def is_model_downloaded(model_id: str) -> bool:
+    if model_id == "codeswitched-medium-recovery":
+        return is_model_downloaded("codeswitched-medium")
     if model_id == "qwencleo-asr-4bit":
         target_dir = MODELS_DIR / "qwencleo-asr"
         return (target_dir / "model.safetensors").exists() and (target_dir / "config.json").exists()
@@ -60,6 +64,8 @@ def is_model_downloaded(model_id: str) -> bool:
 
 
 def get_model_folder_size_gb(model_id: str) -> float:
+    if model_id == "codeswitched-medium-recovery":
+        return get_model_folder_size_gb("codeswitched-medium")
     if model_id == "qwencleo-asr-4bit":
         target_dir = MODELS_DIR / "qwencleo-asr"
     else:
@@ -510,7 +516,7 @@ def run_transcription_pipeline(
 
     # Language determination
     # For specialized Egyptian model or Arabic speech, pin target_lang to 'ar' to eliminate foreign script hallucinations
-    if model_id == "codeswitched-medium":
+    if model_id in ("codeswitched-medium", "codeswitched-medium-recovery"):
         target_lang = "ar"
     elif language in ("auto", "none", None):
         target_lang = None
