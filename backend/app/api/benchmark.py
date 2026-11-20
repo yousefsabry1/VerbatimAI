@@ -37,6 +37,11 @@ HOLDOUT_AUDIO_FILE = BENCHMARK_DIR / "holdout_300_345.wav"
 HOLDOUT_RESULTS_FILE = BENCHMARK_DIR / "benchmark_results_holdout_300_345.json"
 HOLDOUT_META_FILE = BENCHMARK_DIR / "benchmark_meta_holdout_300_345.json"
 
+EVAL_400_445_REF_FILE = BENCHMARK_DIR / "human_reference_eval_400_445.txt"
+EVAL_400_445_AUDIO_FILE = BENCHMARK_DIR / "eval_slice_400_445.wav"
+EVAL_400_445_RESULTS_FILE = BENCHMARK_DIR / "benchmark_results_eval_400_445.json"
+EVAL_400_445_META_FILE = BENCHMARK_DIR / "benchmark_meta_eval_400_445.json"
+
 
 class ReferenceUpdateRequest(BaseModel):
     sample_id: str = "dev_0_103"
@@ -132,6 +137,22 @@ def _ensure_holdout_slice():
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
 
+def _ensure_eval_400_445_slice():
+    """Ensures eval_slice_400_445.wav (06:40-07:25) is extracted from dd.ogg."""
+    if not EVAL_400_445_AUDIO_FILE.exists():
+        src = _find_source_audio()
+        ffmpeg = find_ffmpeg()
+        cmd = [
+            ffmpeg, "-y",
+            "-ss", "400.0",
+            "-to", "445.0",
+            "-i", str(src),
+            "-vn", "-ac", "1", "-ar", "16000",
+            str(EVAL_400_445_AUDIO_FILE),
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+
 SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
     "dev_0_103": {
         "sample_id": "dev_0_103",
@@ -174,6 +195,20 @@ SAMPLE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "ensure_fn": _ensure_holdout_slice,
         "default_verified": False,
         "description": "Strict unseen out-of-sample holdout audio interval (05:00 - 05:45). Reference manually transcribed by user.",
+    },
+    "eval_400_445": {
+        "sample_id": "eval_400_445",
+        "name": "Untouched Holdout Sample (06:40 - 07:25)",
+        "start_time": 400.0,
+        "end_time": 445.0,
+        "duration": 45.0,
+        "ref_file": EVAL_400_445_REF_FILE,
+        "audio_file": EVAL_400_445_AUDIO_FILE,
+        "results_file": EVAL_400_445_RESULTS_FILE,
+        "meta_file": EVAL_400_445_META_FILE,
+        "ensure_fn": _ensure_eval_400_445_slice,
+        "default_verified": False,
+        "description": "New independent untouched holdout interval (06:40 - 07:25). Reference left empty for human verification. Never contains synthetic ground truth.",
     },
 }
 

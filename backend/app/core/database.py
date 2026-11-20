@@ -98,6 +98,18 @@ def init_db():
     );
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS understanding_briefs (
+        job_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        topic_overview TEXT NOT NULL,
+        brief_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    );
+    """)
+
     conn.commit()
     conn.close()
     logger.info("Database initialized successfully at %s", DB_PATH)
@@ -494,3 +506,56 @@ def update_segment_review_status(
     conn.commit()
     conn.close()
     return updated
+
+
+# Understanding Brief CRUD helpers
+def save_understanding_brief(
+    job_id: str,
+    title: str,
+    topic_overview: str,
+    brief_data: Dict[str, Any],
+) -> str:
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    brief_json = json.dumps(brief_data, ensure_ascii=False)
+
+    cursor.execute("""
+    INSERT INTO understanding_briefs (
+        job_id, title, topic_overview, brief_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(job_id) DO UPDATE SET
+        title = excluded.title,
+        topic_overview = excluded.topic_overview,
+        brief_json = excluded.brief_json,
+        updated_at = excluded.updated_at
+    """, (
+        job_id, title, topic_overview, brief_json, now, now
+    ))
+    conn.commit()
+    conn.close()
+    return job_id
+
+
+def get_understanding_brief(job_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM understanding_briefs WHERE job_id = ?", (job_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["brief"] = json.loads(d["brief_json"] or "{}")
+    return d
+
+
+def delete_understanding_brief(job_id: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM understanding_briefs WHERE job_id = ?", (job_id,))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+

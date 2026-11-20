@@ -382,4 +382,40 @@ export const api = {
   getSegmentAudioUrl(jobId: string, segmentId: number, padding: number = 1.0): string {
     return `${API_BASE}/review/${encodeURIComponent(jobId)}/segment/${segmentId}/audio?padding=${padding}`;
   },
+
+  // Evidence-Grounded Speech Understanding & Actionable Briefs
+  async generateUnderstandingBrief(
+    jobId: string,
+    preferHumanCorrected: boolean = true
+  ): Promise<{ status: string; job_id: string; brief: any }> {
+    const res = await fetch(`${API_BASE}/understanding/${encodeURIComponent(jobId)}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefer_human_corrected: preferHumanCorrected }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to generate understanding brief' }));
+      throw new Error(err.detail || 'Failed to generate understanding brief');
+    }
+    return res.json();
+  },
+
+  async getUnderstandingBrief(
+    jobId: string
+  ): Promise<{ status: string; job_id: string; title: string; topic_overview: string; brief: any; created_at: string }> {
+    const res = await fetch(`${API_BASE}/understanding/${encodeURIComponent(jobId)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to fetch understanding brief' }));
+      throw new Error(err.detail || 'Failed to fetch understanding brief');
+    }
+    return res.json();
+  },
+
+  getUnderstandingMarkdownUrl(jobId: string): string {
+    return `${API_BASE}/understanding/${encodeURIComponent(jobId)}/export/markdown`;
+  },
+
+  getUnderstandingJsonUrl(jobId: string): string {
+    return `${API_BASE}/understanding/${encodeURIComponent(jobId)}/export/json`;
+  },
 };

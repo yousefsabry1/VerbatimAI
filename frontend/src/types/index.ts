@@ -258,3 +258,33 @@ export interface VerifySegmentResponse {
   elapsed_seconds?: number;
   peak_vram_mb?: number;
 }
+
+export interface EvidenceSpan {
+  segment_id: number;
+  start: number;
+  end: number;
+  time_formatted: string;
+  quote: string;
+}
+
+export interface InstructionItem {
+  id: string;
+  category: string;
+  title: string;
+  description: string;
+  provenance: 'explicitly_spoken' | 'interpreted_from_context' | 'needs_human_verification';
+  evidence: EvidenceSpan;
+  confidence: number;
+  negation_detected: boolean;
+  reversal_detected: boolean;
+  reversal_details?: string | null;
+}
+
+export interface UnderstandingBrief {
+  job_id: string;
+  title: string;
+  topic_overview: string;
+  summary_counts: Record<string, number>;
+  categories: Record<string, InstructionItem[]>;
+  created_at?: string;
+}

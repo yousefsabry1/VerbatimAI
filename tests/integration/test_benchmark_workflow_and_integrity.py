@@ -46,12 +46,13 @@ def test_get_benchmark_samples_catalog(isolated_benchmark_env):
     assert res.status_code == 200
     data = res.json()
     assert "samples" in data
-    assert len(data["samples"]) == 3
+    assert len(data["samples"]) >= 3
 
     ids = [s["sample_id"] for s in data["samples"]]
     assert "dev_0_103" in ids
     assert "test_180_225" in ids
     assert "holdout_300_345" in ids
+    assert "eval_400_445" in ids
 
 
 def test_reject_empty_reference(isolated_benchmark_env):

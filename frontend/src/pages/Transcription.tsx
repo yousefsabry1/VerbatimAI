@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useI18n } from '../context/I18nContext';
-import { AudioMetadata, HardwareInfo, Job, ModelInfo, Segment, TranscriptResult, SegmentReviewItem } from '../types';
+import { AudioMetadata, HardwareInfo, Job, ModelInfo, Segment, TranscriptResult, SegmentReviewItem, UnderstandingBrief } from '../types';
 import { api } from '../services/api';
 import { AudioPlayer, AudioPlayerRef } from '../components/AudioPlayer';
 import { SegmentVerificationModal } from '../components/SegmentVerificationModal';
 import { ReviewQueuePanel } from '../components/ReviewQueuePanel';
+import { UnderstandingBriefPanel } from '../components/UnderstandingBriefPanel';
 import {
   UploadCloud,
   FileAudio,
@@ -37,6 +38,7 @@ import {
   Columns,
   List,
   ListFilter,
+  Lightbulb,
 } from 'lucide-react';
 
 interface TranscriptionProps {
@@ -127,6 +129,11 @@ export const Transcription: React.FC<TranscriptionProps> = ({
   const [reviewReviewedCount, setReviewReviewedCount] = useState<number>(0);
   const [verificationModalOpen, setVerificationModalOpen] = useState<boolean>(false);
   const [selectedVerificationSegment, setSelectedVerificationSegment] = useState<Segment | null>(null);
+
+  // Evidence-Grounded Speech Understanding (Mode 2) State
+  const [showUnderstanding, setShowUnderstanding] = useState<boolean>(false);
+  const [understandingBrief, setUnderstandingBrief] = useState<UnderstandingBrief | null>(null);
+  const [understandingLoading, setUnderstandingLoading] = useState<boolean>(false);
 
   // Element refs for segment scrolling
   const segmentRefs = useRef<{ [key: number]: HTMLDivElement | null }>({});
@@ -321,6 +328,39 @@ export const Transcription: React.FC<TranscriptionProps> = ({
     const el = segmentRefs.current[segmentId];
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  };
+
+  const handleFetchOrGenerateUnderstanding = async (force: boolean = false) => {
+    if (!activeJobId) return;
+    setUnderstandingLoading(true);
+    try {
+      if (!force) {
+        try {
+          const res = await api.getUnderstandingBrief(activeJobId);
+          setUnderstandingBrief(res.brief);
+          setUnderstandingLoading(false);
+          return;
+        } catch {
+          // If not generated yet, proceed to generate
+        }
+      }
+      const genRes = await api.generateUnderstandingBrief(activeJobId);
+      setUnderstandingBrief(genRes.brief);
+      showToast('Extracted actionable spoken instructions brief!');
+    } catch (e: any) {
+      console.error('Failed to generate understanding brief:', e);
+      showToast('Failed to generate understanding brief: ' + (e.message || ''));
+    } finally {
+      setUnderstandingLoading(false);
+    }
+  };
+
+  const handleToggleUnderstanding = () => {
+    const next = !showUnderstanding;
+    setShowUnderstanding(next);
+    if (next && !understandingBrief) {
+      handleFetchOrGenerateUnderstanding(false);
     }
   };
 
@@ -1285,6 +1325,21 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                   <span>Review Queue {reviewFlaggedCount > 0 ? `(${reviewFlaggedCount})` : ''}</span>
                 </button>
 
+                {/* Evidence-Grounded Understanding (Mode 2) Toggle */}
+                <button
+                  type="button"
+                  onClick={handleToggleUnderstanding}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors ${
+                    showUnderstanding
+                      ? 'bg-purple-600/25 text-purple-200 border-purple-500/40 shadow-sm'
+                      : 'bg-surface-950 text-surface-400 border-surface-800 hover:text-white light:bg-surface-100 light:border-surface-200'
+                  }`}
+                  title="Toggle Evidence-Grounded Speech Understanding & Action Brief (Mode 2)"
+                >
+                  <Lightbulb className="h-3.5 w-3.5 text-purple-400" />
+                  <span>Understand Recording</span>
+                </button>
+
                 {/* Manual Save */}
                 <button
                   type="button"
@@ -1406,6 +1461,18 @@ export const Transcription: React.FC<TranscriptionProps> = ({
               onMarkReviewed={handleMarkSegmentReviewed}
               isOpen={showReviewQueue}
               onClose={() => setShowReviewQueue(false)}
+            />
+          )}
+
+          {/* Evidence-Grounded Speech Understanding Actionable Brief (Mode 2) */}
+          {showUnderstanding && activeJobId && (
+            <UnderstandingBriefPanel
+              brief={understandingBrief}
+              loading={understandingLoading}
+              onRefresh={() => handleFetchOrGenerateUnderstanding(true)}
+              onSeekAudio={(seconds) => playerRef.current?.seekTo(seconds)}
+              onClose={() => setShowUnderstanding(false)}
+              jobId={activeJobId}
             />
           )}
 
