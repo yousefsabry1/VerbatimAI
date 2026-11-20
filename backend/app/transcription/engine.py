@@ -36,6 +36,20 @@ logger = logging.getLogger(__name__)
 _LOADED_MODELS_CACHE: Dict[Tuple[str, str, str], WhisperModel] = {}
 
 
+def clear_loaded_models_cache():
+    """Explicitly releases all cached models from memory and triggers CUDA cache cleanup."""
+    global _LOADED_MODELS_CACHE
+    _LOADED_MODELS_CACHE.clear()
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+
 def sanitize_name(name: str) -> str:
     return str(name).replace("/", "_").replace("\\", "_").replace(":", "_")
 
@@ -47,6 +61,8 @@ def get_model_dir(model_id: str) -> Path:
 
 
 def is_model_downloaded(model_id: str) -> bool:
+    if model_id == "hybrid-v1":
+        return is_model_downloaded("codeswitched-medium") and is_model_downloaded("large-v3-turbo")
     if model_id == "codeswitched-medium-recovery":
         return is_model_downloaded("codeswitched-medium")
     if model_id == "qwencleo-asr-4bit":
@@ -64,6 +80,8 @@ def is_model_downloaded(model_id: str) -> bool:
 
 
 def get_model_folder_size_gb(model_id: str) -> float:
+    if model_id == "hybrid-v1":
+        return round(get_model_folder_size_gb("codeswitched-medium") + get_model_folder_size_gb("large-v3-turbo"), 2)
     if model_id == "codeswitched-medium-recovery":
         return get_model_folder_size_gb("codeswitched-medium")
     if model_id == "qwencleo-asr-4bit":
@@ -85,6 +103,9 @@ def get_model_folder_size_gb(model_id: str) -> float:
 def download_model(model_id: str, progress_callback: Optional[Callable[[float, str], None]] = None) -> Path:
     if model_id not in SUPPORTED_MODELS:
         raise ValueError(f"Unknown model identifier: {model_id}")
+
+    if model_id == "hybrid-v1":
+        raise RuntimeError("Hybrid ASR V1 combines existing installed models and does not require separate download.")
 
     if model_id == "qwencleo-asr-4bit":
         raise RuntimeError(

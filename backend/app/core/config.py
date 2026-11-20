@@ -90,6 +90,16 @@ SUPPORTED_MODELS = {
         "approx_download_gb": 1.46,
         "recommended_for": "Experimental Qwen3 foundation ASR (0.6B parameters, audio-LLM architecture, 52 languages)",
     },
+    "hybrid-v1": {
+        "id": "hybrid-v1",
+        "name": "Verbatim Hybrid ASR V1 (Experimental)",
+        "repo": "verbatim/hybrid-asr-v1",
+        "approx_vram_gb": 3.0,
+        "approx_download_gb": 0.0,
+        "recommended_for": "Multi-model fusion combining Specialized Whisper Medium and Whisper Large-v3-Turbo",
+        "is_experimental": True,
+        "benchmark_only": True,
+    },
 }
 
 SUPPORTED_AUDIO_EXTENSIONS = {

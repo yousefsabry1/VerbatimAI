@@ -1085,6 +1085,22 @@ def run_benchmark(req: BenchmarkRunRequest):
                 dev_transitions = []
                 rep_detected = 0
                 rep_resolved = 0
+            elif model_id == "hybrid-v1":
+                from app.transcription.hybrid_orchestrator import run_hybrid_asr_pipeline
+                hybrid_res = run_hybrid_asr_pipeline(
+                    audio_path=active_audio,
+                    duration_seconds=duration,
+                    device_mode=req.device_mode,
+                    include_qwencleo=False,
+                )
+                elapsed = time.time() - t0
+                pred_text = hybrid_res["fusion_hypotheses"]["conservative_agreement"]["text"]
+                device_used = "cuda"
+                compute_used = "Hybrid Fusion (Specialized + Turbo)"
+                cuda_fallback = False
+                dev_transitions = []
+                rep_detected = 0
+                rep_resolved = 0
             elif model_id == "codeswitched-medium-recovery":
                 res = run_transcription_pipeline(
                     input_path=active_audio,
