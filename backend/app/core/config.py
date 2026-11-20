@@ -11,12 +11,13 @@ STORAGE_DIR = BACKEND_DIR / "storage"
 
 UPLOADS_DIR = STORAGE_DIR / "uploads"
 OUTPUTS_DIR = STORAGE_DIR / "outputs"
+PREVIEWS_DIR = STORAGE_DIR / "previews"
 MODELS_DIR = STORAGE_DIR / "models"
 DB_PATH = STORAGE_DIR / "verbatim.db"
 FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
 
 # Ensure all critical storage directories exist
-for d in [STORAGE_DIR, UPLOADS_DIR, OUTPUTS_DIR, MODELS_DIR]:
+for d in [STORAGE_DIR, UPLOADS_DIR, OUTPUTS_DIR, PREVIEWS_DIR, MODELS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Hardware and Model Configurations

@@ -40,16 +40,21 @@ backend/storage/uploads/*
 !backend/storage/uploads/.gitkeep
 backend/storage/outputs/*
 !backend/storage/outputs/.gitkeep
+backend/storage/previews/*
+!backend/storage/previews/.gitkeep
 backend/storage/models/*
 !backend/storage/models/.gitkeep
 backend/storage/benchmarks/*
 !backend/storage/benchmarks/.gitkeep
+backend/storage/temp/*
+!backend/storage/temp/.gitkeep
 benchmarks/*
 !benchmarks/.gitkeep
 backend/storage/*.db
 backend/storage/*.db-journal
 backend/storage/*.db-wal
 backend/storage/*.db-shm
+backend/storage/*.backup*
 
 # Private User Media & Personal Test Files
 dd.ogg

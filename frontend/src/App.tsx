@@ -13,17 +13,73 @@ import { api } from './services/api';
 import { ShieldCheck } from 'lucide-react';
 
 const AppContent: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  // Initialize state from URL query parameters or localStorage for refresh recovery
+  const getInitialState = () => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const tabFromUrl = params.get('tab');
+      const jobFromUrl = params.get('job_id');
+      const storedTab = localStorage.getItem('verbatim_active_tab');
+      const storedJobId = localStorage.getItem('verbatim_active_job_id');
+
+      const initialJob = jobFromUrl || storedJobId || null;
+      let initialTab = tabFromUrl || (initialJob ? 'transcription' : storedTab) || 'dashboard';
+      if (!['dashboard', 'transcription', 'benchmark', 'converter', 'history', 'settings'].includes(initialTab)) {
+        initialTab = 'dashboard';
+      }
+
+      return { initialTab, initialJob };
+    } catch {
+      return { initialTab: 'dashboard', initialJob: null };
+    }
+  };
+
+  const { initialTab, initialJob } = getInitialState();
+  const [activeTab, setActiveTab] = useState<string>(initialTab);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
-  const [selectedReviewJobId, setSelectedReviewJobId] = useState<string | null>(null);
+  const [selectedReviewJobId, setSelectedReviewJobId] = useState<string | null>(initialJob);
 
   useEffect(() => {
     api.getHardware().then(setHardware).catch(console.error);
   }, []);
 
+  // Keep URL parameters and localStorage synchronized for seamless browser refresh
+  useEffect(() => {
+    try {
+      localStorage.setItem('verbatim_active_tab', activeTab);
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', activeTab);
+
+      if (activeTab === 'transcription' && selectedReviewJobId) {
+        url.searchParams.set('job_id', selectedReviewJobId);
+        localStorage.setItem('verbatim_active_job_id', selectedReviewJobId);
+      } else if (activeTab !== 'transcription') {
+        url.searchParams.delete('job_id');
+      }
+
+      window.history.replaceState({}, '', url.toString());
+    } catch (e) {
+      console.warn('URL sync failed:', e);
+    }
+  }, [activeTab, selectedReviewJobId]);
+
   const handleSelectJobForReview = (jobId: string) => {
     setSelectedReviewJobId(jobId);
     setActiveTab('transcription');
+    try {
+      localStorage.setItem('verbatim_active_job_id', jobId);
+      localStorage.setItem('verbatim_active_tab', 'transcription');
+    } catch {}
+  };
+
+  const handleJobCleared = () => {
+    setSelectedReviewJobId(null);
+    try {
+      localStorage.removeItem('verbatim_active_job_id');
+      const url = new URL(window.location.href);
+      url.searchParams.delete('job_id');
+      window.history.replaceState({}, '', url.toString());
+    } catch {}
   };
 
   return (
@@ -46,7 +102,8 @@ const AppContent: React.FC = () => {
         {activeTab === 'transcription' && (
           <Transcription
             initialJobId={selectedReviewJobId}
-            onClearInitialJob={() => setSelectedReviewJobId(null)}
+            onJobActive={(jobId) => setSelectedReviewJobId(jobId)}
+            onClearInitialJob={handleJobCleared}
             hardware={hardware}
           />
         )}

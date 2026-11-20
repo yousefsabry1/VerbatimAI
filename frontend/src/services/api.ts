@@ -57,8 +57,8 @@ export const api = {
     return res.json();
   },
 
-  getAudioStreamUrl(fileId: string): string {
-    return `${API_BASE}/audio/stream/${fileId}`;
+  getAudioStreamUrl(fileId: string, preview: boolean = true): string {
+    return `${API_BASE}/audio/stream/${fileId}?preview=${preview}`;
   },
 
   // Transcription
