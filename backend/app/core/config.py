@@ -62,6 +62,14 @@ SUPPORTED_MODELS = {
         "approx_download_gb": 3.1,
         "recommended_for": "Highest accuracy for difficult audio, accents, and mixed speech",
     },
+    "qwen3-asr-0.6b-hf": {
+        "id": "qwen3-asr-0.6b-hf",
+        "name": "Qwen3-ASR 0.6B (Experimental Multilingual)",
+        "repo": "Qwen/Qwen3-ASR-0.6B-hf",
+        "approx_vram_gb": 2.2,
+        "approx_download_gb": 1.46,
+        "recommended_for": "Experimental Qwen3 foundation ASR (0.6B parameters, audio-LLM architecture, 52 languages)",
+    },
 }
 
 SUPPORTED_AUDIO_EXTENSIONS = {

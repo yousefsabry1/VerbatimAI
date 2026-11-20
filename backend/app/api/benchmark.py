@@ -31,6 +31,11 @@ TEST_AUDIO_FILE = BENCHMARK_DIR / "test_slice_180_225.wav"
 TEST_RESULTS_FILE = BENCHMARK_DIR / "benchmark_results_test_180_225.json"
 TEST_META_FILE = BENCHMARK_DIR / "benchmark_meta_test_180_225.json"
 
+HOLDOUT_REF_FILE = BENCHMARK_DIR / "human_reference_holdout_300_345.txt"
+HOLDOUT_AUDIO_FILE = BENCHMARK_DIR / "holdout_300_345.wav"
+HOLDOUT_RESULTS_FILE = BENCHMARK_DIR / "benchmark_results_holdout_300_345.json"
+HOLDOUT_META_FILE = BENCHMARK_DIR / "benchmark_meta_holdout_300_345.json"
+
 
 class ReferenceUpdateRequest(BaseModel):
     sample_id: str = "dev_0_103"
@@ -87,6 +92,22 @@ def _ensure_test_slice():
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
 
+def _ensure_holdout_slice():
+    """Ensures holdout_300_345.wav (05:00-05:45) is extracted from dd.ogg."""
+    if not HOLDOUT_AUDIO_FILE.exists():
+        src = _find_source_audio()
+        ffmpeg = find_ffmpeg()
+        cmd = [
+            ffmpeg, "-y",
+            "-ss", "300.0",
+            "-to", "345.0",
+            "-i", str(src),
+            "-vn", "-ac", "1", "-ar", "16000",
+            str(HOLDOUT_AUDIO_FILE),
+        ]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+
 def _ensure_dev_slice():
     """Ensures ref_103s.wav (00:00-01:43.5) is extracted from dd.ogg."""
     if not DEV_AUDIO_FILE.exists():
@@ -109,6 +130,7 @@ def get_benchmark_samples():
     """
     _ensure_dev_slice()
     _ensure_test_slice()
+    _ensure_holdout_slice()
 
     dev_words = 0
     if DEV_REF_FILE.exists():
@@ -125,6 +147,18 @@ def get_benchmark_samples():
                 test_verified = m.get("is_human_verified", False) and test_words > 0
             except Exception:
                 test_verified = False
+
+    holdout_words = 0
+    holdout_verified = False
+    if HOLDOUT_REF_FILE.exists():
+        holdout_txt = HOLDOUT_REF_FILE.read_text(encoding="utf-8").strip()
+        holdout_words = len(holdout_txt.split())
+        if HOLDOUT_META_FILE.exists():
+            try:
+                m = json.loads(HOLDOUT_META_FILE.read_text(encoding="utf-8"))
+                holdout_verified = m.get("is_human_verified", False) and holdout_words > 0
+            except Exception:
+                holdout_verified = False
 
     return {
         "samples": [
@@ -161,6 +195,26 @@ def get_benchmark_samples():
                     + ("Human reference verified." if test_verified else "Requires manual human verification against audio.")
                 ),
             },
+            {
+                "sample_id": "holdout_300_345",
+                "name": "Genuinely New Holdout Test Sample (05:00 - 05:45)",
+                "start_time": 300.0,
+                "end_time": 345.0,
+                "duration": 45.0,
+                "audio_url": "/api/benchmark/audio/holdout_300_345",
+                "status": "VERIFIED" if holdout_verified else "UNVERIFIED",
+                "verification_badge": (
+                    f"Verified Human Reference ({holdout_words} words)"
+                    if holdout_verified
+                    else "UNVERIFIED — Pending Human Transcription"
+                ),
+                "has_human_reference": holdout_verified,
+                "word_count": holdout_words,
+                "description": (
+                    "Strict unseen out-of-sample holdout audio interval (05:00 - 05:45). "
+                    + ("Human reference verified." if holdout_verified else "Reference left strictly blank for manual human transcription.")
+                ),
+            },
         ],
         "audit_notice": {
             "invalidated_slice": "04:05 - 04:55 (245s - 295s)",
@@ -177,11 +231,14 @@ def stream_benchmark_audio(sample_id: str):
     """
     _ensure_dev_slice()
     _ensure_test_slice()
+    _ensure_holdout_slice()
 
     if sample_id == "dev_0_103":
         target = DEV_AUDIO_FILE
     elif sample_id == "test_180_225":
         target = TEST_AUDIO_FILE
+    elif sample_id == "holdout_300_345":
+        target = HOLDOUT_AUDIO_FILE
     elif sample_id == "full":
         target = _find_source_audio()
     else:
@@ -206,6 +263,43 @@ def get_reference(sample_id: str = Query("dev_0_103")):
     """
     Retrieves the reference transcript and verification status for a benchmark sample.
     """
+    if sample_id == "holdout_300_345":
+        if not HOLDOUT_REF_FILE.exists():
+            return {
+                "sample_id": "holdout_300_345",
+                "has_reference": False,
+                "is_human_verified": False,
+                "verification_status": "UNVERIFIED — Pending Human Transcription",
+                "raw_text": "",
+                "normalized_text": "",
+                "start_time": 300.0,
+                "end_time": 345.0,
+                "word_count_raw": 0,
+                "word_count_norm": 0,
+            }
+        raw_text = HOLDOUT_REF_FILE.read_text(encoding="utf-8").strip()
+        norm_text = normalize_arabic_english(raw_text)
+        is_verified = False
+        if HOLDOUT_META_FILE.exists():
+            try:
+                m = json.loads(HOLDOUT_META_FILE.read_text(encoding="utf-8"))
+                is_verified = m.get("is_human_verified", False) and len(raw_text.split()) > 0
+            except Exception:
+                is_verified = False
+
+        return {
+            "sample_id": "holdout_300_345",
+            "has_reference": is_verified,
+            "is_human_verified": is_verified,
+            "verification_status": "VERIFIED" if is_verified else "UNVERIFIED — Pending Human Transcription",
+            "raw_text": raw_text,
+            "normalized_text": norm_text,
+            "start_time": 300.0,
+            "end_time": 345.0,
+            "word_count_raw": len(raw_text.split()),
+            "word_count_norm": len(norm_text.split()),
+        }
+
     if sample_id == "test_180_225":
         if not TEST_REF_FILE.exists():
             return {
@@ -280,6 +374,25 @@ def save_reference(req: ReferenceUpdateRequest):
     """
     cleaned_text = req.reference_text.strip()
 
+    if req.sample_id == "holdout_300_345":
+        HOLDOUT_REF_FILE.write_text(cleaned_text, encoding="utf-8")
+        meta = {
+            "sample_id": "holdout_300_345",
+            "start_time": 300.0,
+            "end_time": 345.0,
+            "is_human_verified": bool(req.is_human_verified and len(cleaned_text.split()) > 0),
+            "verification_statement": req.verification_statement or "Human user verified against audio recording.",
+            "updated_at": time.time(),
+            "word_count": len(cleaned_text.split()),
+        }
+        HOLDOUT_META_FILE.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        return {
+            "status": "success",
+            "sample_id": "holdout_300_345",
+            "is_human_verified": meta["is_human_verified"],
+            "message": "Holdout reference saved successfully." + (" Certified as human verified." if meta["is_human_verified"] else " Saved as draft (unverified)."),
+        }
+
     if req.sample_id == "test_180_225":
         TEST_REF_FILE.write_text(cleaned_text, encoding="utf-8")
         meta = {
@@ -317,7 +430,12 @@ def get_latest_results(sample_id: str = Query("dev_0_103")):
     """
     Returns latest benchmark results for the requested sample.
     """
-    target_results_file = TEST_RESULTS_FILE if sample_id == "test_180_225" else DEV_RESULTS_FILE
+    if sample_id == "holdout_300_345":
+        target_results_file = HOLDOUT_RESULTS_FILE
+    elif sample_id == "test_180_225":
+        target_results_file = TEST_RESULTS_FILE
+    else:
+        target_results_file = DEV_RESULTS_FILE
 
     if not target_results_file.exists():
         return {"has_results": False, "sample_id": sample_id, "results": []}
@@ -336,16 +454,29 @@ def run_benchmark(req: BenchmarkRunRequest):
     """
     _ensure_dev_slice()
     _ensure_test_slice()
+    _ensure_holdout_slice()
 
+    is_holdout_sample = (req.sample_id == "holdout_300_345") or (abs(req.start_time - 300.0) < 1.0 and abs(req.end_time - 345.0) < 1.0)
     is_test_sample = (req.sample_id == "test_180_225") or (abs(req.start_time - 180.0) < 1.0 and abs(req.end_time - 225.0) < 1.0)
-    current_sample_id = "test_180_225" if is_test_sample else "dev_0_103"
+
+    if is_holdout_sample:
+        current_sample_id = "holdout_300_345"
+    elif is_test_sample:
+        current_sample_id = "test_180_225"
+    else:
+        current_sample_id = "dev_0_103"
 
     ref_data = get_reference(current_sample_id)
     has_valid_human_ref = ref_data.get("is_human_verified", False) and ref_data.get("word_count_raw", 0) > 0
     human_ref = ref_data.get("raw_text", "")
 
     # Select audio slice
-    if is_test_sample:
+    if is_holdout_sample:
+        sliced_audio = HOLDOUT_AUDIO_FILE
+        duration = 45.0
+        start_t = 300.0
+        end_t = 345.0
+    elif is_test_sample:
         sliced_audio = TEST_AUDIO_FILE
         duration = 45.0
         start_t = 180.0
@@ -475,7 +606,12 @@ def run_benchmark(req: BenchmarkRunRequest):
         sliced_audio.unlink(missing_ok=True)
 
     # Save to corresponding results file
-    target_results_file = TEST_RESULTS_FILE if is_test_sample else DEV_RESULTS_FILE
+    if is_holdout_sample:
+        target_results_file = HOLDOUT_RESULTS_FILE
+    elif is_test_sample:
+        target_results_file = TEST_RESULTS_FILE
+    else:
+        target_results_file = DEV_RESULTS_FILE
     target_results_file.write_text(json.dumps(benchmark_runs, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {

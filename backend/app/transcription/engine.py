@@ -47,9 +47,11 @@ def get_model_dir(model_id: str) -> Path:
 def is_model_downloaded(model_id: str) -> bool:
     target_dir = get_model_dir(model_id)
     marker = target_dir / ".ready"
-    if marker.exists() and (target_dir / "model.bin").exists():
+    if marker.exists():
         return True
     if (target_dir / "model.bin").exists() and (target_dir / "config.json").exists():
+        return True
+    if (target_dir / "model.safetensors").exists() and (target_dir / "config.json").exists():
         return True
     return False
 

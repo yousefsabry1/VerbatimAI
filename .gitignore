@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 backend/.venv/
+experimental_venv/
 .venv/
 env/
 venv/
