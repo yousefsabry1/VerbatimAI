@@ -91,10 +91,11 @@ SUPPORTED_OUTPUT_FORMATS = [
     "mp3", "wav", "ogg", "opus", "m4a", "aac", "flac", "aiff", "webm"
 ]
 
-# Neutral, clean vocabulary hints without meta-explanatory sentences
+# Neutral, clean vocabulary hints without benchmark evaluation reference terms.
+# Evaluation terms (Instructors, Volunteers, Registration, Committees) are strictly excluded to prevent contamination.
 DEFAULT_VOCAB_HINTS = (
     "IEEE, CIS, IEEE Egypt Section, Branch, Chapter, Proposal, Event, "
-    "Instructors, Certified Instructors, Academy, Hosting, Closing Ceremony, STEM, AI, Volunteers, Huawei"
+    "Academy, Hosting, Closing Ceremony, AI, Huawei"
 )
 
 MAX_UPLOAD_SIZE_BYTES = 1024 * 1024 * 500  # 500 MB max file size for local desktop app

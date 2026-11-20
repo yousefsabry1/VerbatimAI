@@ -15,6 +15,9 @@ def test_default_vocab_hints_contains_key_terms():
     assert "CIS" in DEFAULT_VOCAB_HINTS
     assert "Proposal" in DEFAULT_VOCAB_HINTS
     assert "Event" in DEFAULT_VOCAB_HINTS
+    # Assert benchmark evaluation reference terms are strictly excluded to prevent contamination
+    for term in ["Volunteers", "Committees", "Instructors", "Registration"]:
+        assert term not in DEFAULT_VOCAB_HINTS, f"Contamination risk: {term} found in DEFAULT_VOCAB_HINTS"
     # Assert harmful conversational bias words are NOT in the default hints
     assert "meeting, team, project, deadline" not in DEFAULT_VOCAB_HINTS
 
