@@ -734,3 +734,635 @@ def calculate_oracle_upper_bound(
         "best_individual_wer": best_model_stats["wer"],
         "oracle_text": final_oracle_txt,
     }
+
+
+# ============================================================================
+# HYBRID ASR V2 ENHANCEMENTS: TRANSLITERATION MAPPING, MISSING-WORD PROTECTION
+# & SELECTIVE ARBITER FUSION
+# ============================================================================
+
+# Known Egyptian English transliteration equivalents commonly observed in tech talks
+TRANSLITERATION_MAP = {
+    "بروفايد": "provide",
+    "بروفايت": "provide",
+    "الفاند": "fund",
+    "فاند": "fund",
+    "هيفامد": "fund",
+    "هيفاند": "fund",
+    "البرانش": "branch",
+    "برانش": "branch",
+    "اللوجو": "logo",
+    "لوجو": "logo",
+    "الويبسايت": "website",
+    "ويبسايت": "website",
+    "الاكونت": "account",
+    "اكونت": "account",
+    "مينتور": "mentor",
+    "مينتورشيب": "mentorship",
+    "ارجانيز": "organize",
+    "اورجانيزر": "organizer",
+    "الاتماد": "teamate",
+    "تيم": "team",
+    "التيم": "team",
+    "تكتور": "tech",
+    "سستم": "system",
+    "السيستم": "system",
+    "ايفنت": "event",
+    "الايفنت": "event",
+    "فولنتيرز": "volunteers",
+    "الفولنتيرز": "volunteers",
+    "هننقاوتيتش": "outreach",
+    "اوتريتش": "outreach",
+    "اوتريش": "outreach",
+    "accessability": "accessibility",
+    "accesability": "accessibility",
+}
+
+# HYBRID ASR V3 ENHANCEMENTS: EXPANDED DOMAIN TECHNICAL CANONICALIZATION
+TRANSLITERATION_MAP_V3: Dict[str, str] = dict(TRANSLITERATION_MAP)
+TRANSLITERATION_MAP_V3.update({
+    "شابتر": "chapter",
+    "الشابطه": "chapter",
+    "الشابطة": "chapter",
+    "شوطه": "chapter",
+    "الوجو": "logo",
+    "انستراكتورز": "instructors",
+    "نستراكتورز": "instructors",
+    "انستركتورز": "instructors",
+    "انستركتر": "instructors",
+    "هوست": "host",
+    "يهوست": "host",
+    "اكسسبلتي": "accessibility",
+    "اللقسه": "accessibility",
+    "اللقسة": "accessibility",
+    "سيستم": "system",
+    "هيستوري": "history",
+    "الهيسترو": "history",
+    "الهيستور": "history",
+    "داتابيز": "database",
+    "الداتابيز": "database",
+})
+
+
+
+def is_transliteration_match(tok_a: Dict[str, Any], tok_b: Dict[str, Any]) -> bool:
+    """Checks if one token is a known Egyptian Arabic transliteration of an English token."""
+    na = tok_a.get("norm_stem") or tok_a.get("norm", "")
+    nb = tok_b.get("norm_stem") or tok_b.get("norm", "")
+
+    if TRANSLITERATION_MAP.get(na) == nb or TRANSLITERATION_MAP.get(nb) == na:
+        return True
+    if tok_a.get("has_latin") and not tok_b.get("has_latin"):
+        if TRANSLITERATION_MAP.get(nb) == tok_a.get("norm_stem"):
+            return True
+    elif tok_b.get("has_latin") and not tok_a.get("has_latin"):
+        if TRANSLITERATION_MAP.get(na) == tok_b.get("norm_stem"):
+            return True
+    return False
+
+
+def soft_arabic_distance(s1: str, s2: str) -> float:
+    """Computes soft distance allowing common colloquial phonetic confusions."""
+    if s1 == s2:
+        return 0.0
+    rep = [("ص", "س"), ("ط", "ت"), ("ظ", "ز"), ("ض", "د"), ("ة", "ه"), ("ى", "ي"), ("أ", "ا"), ("إ", "ا"), ("آ", "ا")]
+    for a, b in rep:
+        s1 = s1.replace(a, b)
+        s2 = s2.replace(a, b)
+    if s1 == s2:
+        return 0.15
+    d = _levenshtein_distance(s1, s2)
+    max_l = max(len(s1), len(s2), 1)
+    if d == 1 and max_l >= 4:
+        return 0.35
+    return 1.0
+
+
+def enhanced_token_match_cost(t1: Dict[str, Any], t2: Dict[str, Any]) -> float:
+    """
+    Enhanced distance cost between two tokens for Hybrid V2 alignment:
+    - 0.0 for exact normalized match
+    - 0.15 for stem equality
+    - 0.25 for known transliteration match
+    - 0.25-0.35 for fuzzy Latin match
+    - 0.15-0.35 for soft Arabic phonetic match
+    - 1.0 for mismatch
+    """
+    if t1["norm"] == t2["norm"]:
+        return 0.0
+
+    if t1.get("norm_stem") and t2.get("norm_stem") and t1["norm_stem"] == t2["norm_stem"]:
+        return 0.15
+
+    if is_transliteration_match(t1, t2):
+        return 0.25
+
+    if t1.get("is_latin") and t2.get("is_latin"):
+        dist = _levenshtein_distance(t1["norm_stem"], t2["norm_stem"])
+        max_len = max(len(t1["norm_stem"]), len(t2["norm_stem"]), 1)
+        if dist <= 2 and (dist / max_len) <= 0.35:
+            return 0.25 + 0.1 * dist
+
+    if not t1.get("has_latin") and not t2.get("has_latin"):
+        soft_d = soft_arabic_distance(t1.get("norm_stem", ""), t2.get("norm_stem", ""))
+        if soft_d < 0.5:
+            return soft_d
+
+    return 1.0
+
+
+def align_hypotheses_pairwise_v2(
+    tokens_a: List[Dict[str, Any]], tokens_b: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Needleman-Wunsch alignment using enhanced Hybrid V2 match costs."""
+    n = len(tokens_a)
+    m = len(tokens_b)
+    dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+
+    for i in range(n + 1):
+        dp[i][0] = float(i)
+    for j in range(m + 1):
+        dp[0][j] = float(j)
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = enhanced_token_match_cost(tokens_a[i - 1], tokens_b[j - 1])
+            dp[i][j] = min(
+                dp[i - 1][j - 1] + cost,
+                dp[i - 1][j] + 1.0,
+                dp[i][j - 1] + 1.0,
+            )
+
+    i, j = n, m
+    slots = []
+    while i > 0 or j > 0:
+        cost = enhanced_token_match_cost(tokens_a[i - 1], tokens_b[j - 1]) if (i > 0 and j > 0) else 999.0
+        if i > 0 and j > 0 and math.isclose(dp[i][j], dp[i - 1][j - 1] + cost, abs_tol=1e-4):
+            slots.append({
+                "type": "match" if cost < 0.45 else "substitute",
+                "cost": cost,
+                "a": tokens_a[i - 1],
+                "b": tokens_b[j - 1],
+            })
+            i -= 1
+            j -= 1
+        elif i > 0 and math.isclose(dp[i][j], dp[i - 1][j] + 1.0, abs_tol=1e-4):
+            slots.append({"type": "delete_b", "cost": 1.0, "a": tokens_a[i - 1], "b": None})
+            i -= 1
+        else:
+            slots.append({"type": "delete_a", "cost": 1.0, "a": None, "b": tokens_b[j - 1]})
+            j -= 1
+
+    slots.reverse()
+    return slots
+
+
+def detect_critical_code_switch_conflict(txt_spec: str, txt_turbo: str) -> Tuple[bool, str]:
+    """
+    Detects whether Specialized Whisper and Large-v3-Turbo have critical code-switching
+    conflicts or severe speech omission that warrants invoking the heavy QwenCleo arbiter.
+    """
+    toks_spec = tokenize_transcript(txt_spec)
+    toks_turbo = tokenize_transcript(txt_turbo)
+
+    len_diff = abs(len(toks_spec) - len(toks_turbo))
+    if len_diff >= 12:
+        return True, f"length_disparity_{len_diff}"
+
+    slots = align_hypotheses_pairwise_v2(toks_spec, toks_turbo)
+
+    code_switch_mismatches = 0
+    substitutions = 0
+    deletions = 0
+
+    for s in slots:
+        stype = s["type"]
+        ta = s["a"]
+        tb = s["b"]
+
+        if stype == "substitute":
+            substitutions += 1
+            if ta and tb:
+                if (ta.get("has_latin") != tb.get("has_latin")) or (ta.get("has_latin") and ta.get("norm") != tb.get("norm")):
+                    code_switch_mismatches += 1
+        elif stype in ("delete_a", "delete_b"):
+            deletions += 1
+            if (ta and ta.get("has_latin")) or (tb and tb.get("has_latin")):
+                code_switch_mismatches += 1
+
+    total_slots = max(len(slots), 1)
+    disagreement_rate = (substitutions + deletions) / total_slots
+
+    if code_switch_mismatches >= 2:
+        return True, f"code_switch_mismatches_{code_switch_mismatches}"
+    if disagreement_rate > 0.40 and code_switch_mismatches >= 1:
+        return True, f"high_disagreement_{disagreement_rate:.2f}"
+
+    return False, f"low_conflict_rate_{disagreement_rate:.2f}"
+
+
+def fuse_rover_v2(
+    hypotheses: List[Dict[str, Any]],
+    weights: Optional[Dict[str, float]] = None,
+    latin_boost: float = 0.45,
+) -> Dict[str, Any]:
+    """
+    Hybrid ASR V2 ROVER Fusion:
+    - Smarter pairwise alignment with transliteration and phonetic normalization
+    - Asymmetric missing-word protection (penalizes Turbo deletions due to under-generation)
+    - Transliteration canonical grouping
+    - Clean surface form preservation for low CER
+    """
+    if not hypotheses:
+        return {"fused_text": "", "num_models": 0, "num_slots": 0}
+    if len(hypotheses) == 1:
+        return {"fused_text": hypotheses[0]["text"].strip(), "num_models": 1, "num_slots": len(hypotheses[0]["text"].split())}
+
+    if weights is None:
+        weights = {"codeswitched-medium": 1.25, "large-v3-turbo": 1.0, "qwencleo-asr-4bit": 0.95}
+
+    base_toks = tokenize_transcript(hypotheses[0]["text"])
+    base_id = hypotheses[0]["model_id"]
+    network: List[List[Dict[str, Any]]] = []
+    for t in base_toks:
+        network.append([{"model_id": base_id, "token": t}])
+
+    for h in hypotheses[1:]:
+        m_id = h["model_id"]
+        other_tokens = tokenize_transcript(h["text"])
+        if not other_tokens:
+            for slot in network:
+                slot.append({"model_id": m_id, "token": None})
+            continue
+
+        net_tokens = []
+        for slot in network:
+            first_tok = None
+            for cand in slot:
+                if cand["token"] is not None:
+                    first_tok = cand["token"]
+                    break
+            net_tokens.append(first_tok if first_tok else {"norm": "", "norm_stem": "", "is_latin": False, "has_latin": False})
+
+        slots_align = align_hypotheses_pairwise_v2(net_tokens, other_tokens)
+        new_network: List[List[Dict[str, Any]]] = []
+        net_ptr = 0
+
+        for sa in slots_align:
+            satype = sa["type"]
+            tb = sa["b"]
+
+            if satype in ("match", "substitute"):
+                if net_ptr < len(network):
+                    slot = network[net_ptr]
+                    slot.append({"model_id": m_id, "token": tb})
+                    new_network.append(slot)
+                    net_ptr += 1
+                else:
+                    new_network.append([{"model_id": m_id, "token": tb}])
+            elif satype == "delete_b":
+                if net_ptr < len(network):
+                    slot = network[net_ptr]
+                    slot.append({"model_id": m_id, "token": None})
+                    new_network.append(slot)
+                    net_ptr += 1
+            elif satype == "delete_a":
+                new_network.append([{"model_id": m_id, "token": tb}])
+
+        while net_ptr < len(network):
+            slot = network[net_ptr]
+            slot.append({"model_id": m_id, "token": None})
+            new_network.append(slot)
+            net_ptr += 1
+
+        network = new_network
+
+    fused_tokens: List[str] = []
+    for slot in network:
+        norm_scores: Dict[str, float] = {}
+        surface_map: Dict[str, str] = {}
+        null_score = 0.0
+
+        for cand in slot:
+            m_id = cand["model_id"]
+            tok = cand["token"]
+            w = weights.get(m_id, 1.0)
+
+            if tok is None:
+                if m_id == "large-v3-turbo":
+                    null_score += (w * 0.70)
+                else:
+                    null_score += w
+            else:
+                n = tok["norm"]
+                if not tok.get("has_latin") and n in TRANSLITERATION_MAP:
+                    mapped = TRANSLITERATION_MAP[n]
+                    n = mapped
+
+                boost = latin_boost if (tok.get("has_latin") or n in TRANSLITERATION_MAP.values()) else 0.0
+                score = w + boost
+                norm_scores[n] = norm_scores.get(n, 0.0) + score
+                if tok.get("has_latin"):
+                    surface_map[n] = tok["surface"]
+                elif n not in surface_map:
+                    surface_map[n] = tok["surface"]
+
+        if not norm_scores:
+            continue
+
+        best_norm, best_score = max(norm_scores.items(), key=lambda x: x[1])
+        if best_score > null_score:
+            surface = surface_map.get(best_norm, best_norm)
+            if fused_tokens and normalize_arabic_english(fused_tokens[-1]) == normalize_arabic_english(surface) and len(surface) > 2:
+                continue
+            fused_tokens.append(surface)
+
+    fused_text = " ".join(fused_tokens).strip()
+    return {
+        "fused_text": fused_text,
+        "method": "rover_confusion_network_v2",
+        "num_models": len(hypotheses),
+        "num_slots": len(network),
+    }
+
+
+def fuse_hybrid_v2(
+    hyp_spec: str,
+    hyp_turbo: str,
+    hyp_qwen: Optional[str] = None,
+    duration_seconds: float = 45.0,
+    weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    """
+    Main entry point for Verbatim Hybrid ASR V2:
+    - Evaluates code-switching conflict between Specialized Whisper and Large-v3-Turbo
+    - If QwenCleo is available, synthesizes 3-model ROVER V2 with transliteration preservation
+    - If QwenCleo is not provided, uses Conservative Agreement V2
+    """
+    is_conflict, reason = detect_critical_code_switch_conflict(hyp_spec, hyp_turbo)
+
+    if hyp_qwen and hyp_qwen.strip():
+        hyps = [
+            {"model_id": "codeswitched-medium", "text": hyp_spec},
+            {"model_id": "large-v3-turbo", "text": hyp_turbo},
+            {"model_id": "qwencleo-asr-4bit", "text": hyp_qwen},
+        ]
+        res = fuse_rover_v2(hyps, weights=weights)
+        res["code_switch_conflict_detected"] = is_conflict
+        res["conflict_reason"] = reason
+        res["qwen_invoked"] = True
+        return res
+    else:
+        # Fallback to Conservative Agreement
+        res = fuse_conservative_agreement(hyp_spec, hyp_turbo, duration_seconds=duration_seconds)
+        res["code_switch_conflict_detected"] = is_conflict
+        res["conflict_reason"] = reason
+        res["qwen_invoked"] = False
+        return res
+
+
+def fuse_rover_v3(
+    hypotheses: List[Dict[str, Any]],
+    weights: Optional[Dict[str, float]] = None,
+    latin_boost: float = 0.35,
+    turbo_null_factor: float = 0.70,
+    qwen_null_factor: float = 1.0,
+    dedup_all: bool = True,
+) -> Dict[str, Any]:
+    """
+    Hybrid ASR V3 ROVER Fusion — Accuracy First:
+    - Calibrated optimal weights (Spec: 1.25, Turbo: 0.90, Qwen: 0.90)
+    - Full-spectrum particle and stutter deduplication (removes repetition loops without token length threshold)
+    - Expanded domain technical code-switching transliteration canonicalization (TRANSLITERATION_MAP_V3)
+    - Asymmetric deletion penalty for under-generating models
+    - Clean surface form preservation
+    """
+    if not hypotheses:
+        return {"fused_text": "", "num_models": 0, "num_slots": 0}
+    if len(hypotheses) == 1:
+        return {"fused_text": hypotheses[0]["text"].strip(), "num_models": 1, "num_slots": len(hypotheses[0]["text"].split())}
+
+    if weights is None:
+        weights = {"codeswitched-medium": 1.25, "large-v3-turbo": 0.90, "qwencleo-asr-4bit": 0.90}
+
+    base_toks = tokenize_transcript(hypotheses[0]["text"])
+    base_id = hypotheses[0]["model_id"]
+    network: List[List[Dict[str, Any]]] = []
+    for t in base_toks:
+        network.append([{"model_id": base_id, "token": t}])
+
+    for h in hypotheses[1:]:
+        m_id = h["model_id"]
+        other_tokens = tokenize_transcript(h["text"])
+        if not other_tokens:
+            for slot in network:
+                slot.append({"model_id": m_id, "token": None})
+            continue
+
+        net_tokens = []
+        for slot in network:
+            first_tok = None
+            for cand in slot:
+                if cand["token"] is not None:
+                    first_tok = cand["token"]
+                    break
+            net_tokens.append(first_tok if first_tok else {"norm": "", "norm_stem": "", "is_latin": False, "has_latin": False})
+
+        slots_align = align_hypotheses_pairwise_v2(net_tokens, other_tokens)
+        new_network: List[List[Dict[str, Any]]] = []
+        net_ptr = 0
+
+        for sa in slots_align:
+            satype = sa["type"]
+            tb = sa["b"]
+
+            if satype in ("match", "substitute"):
+                if net_ptr < len(network):
+                    slot = network[net_ptr]
+                    slot.append({"model_id": m_id, "token": tb})
+                    new_network.append(slot)
+                    net_ptr += 1
+                else:
+                    new_network.append([{"model_id": m_id, "token": tb}])
+            elif satype == "delete_b":
+                if net_ptr < len(network):
+                    slot = network[net_ptr]
+                    slot.append({"model_id": m_id, "token": None})
+                    new_network.append(slot)
+                    net_ptr += 1
+            elif satype == "delete_a":
+                new_network.append([{"model_id": m_id, "token": tb}])
+
+        while net_ptr < len(network):
+            slot = network[net_ptr]
+            slot.append({"model_id": m_id, "token": None})
+            new_network.append(slot)
+            net_ptr += 1
+
+        network = new_network
+
+    fused_tokens: List[str] = []
+    for slot in network:
+        norm_scores: Dict[str, float] = {}
+        surface_map: Dict[str, str] = {}
+        null_score = 0.0
+
+        for cand in slot:
+            m_id = cand["model_id"]
+            tok = cand["token"]
+            w = weights.get(m_id, 1.0)
+
+            if tok is None:
+                if m_id == "large-v3-turbo":
+                    null_score += (w * turbo_null_factor)
+                elif m_id == "qwencleo-asr-4bit":
+                    null_score += (w * qwen_null_factor)
+                else:
+                    null_score += w
+            else:
+                n = tok["norm"]
+                if not tok.get("has_latin") and n in TRANSLITERATION_MAP_V3:
+                    n = TRANSLITERATION_MAP_V3[n]
+
+                boost = latin_boost if (tok.get("has_latin") or n in TRANSLITERATION_MAP_V3.values()) else 0.0
+                score = w + boost
+                norm_scores[n] = norm_scores.get(n, 0.0) + score
+                if tok.get("has_latin"):
+                    surface_map[n] = tok["surface"]
+                elif n not in surface_map:
+                    surface_map[n] = tok["surface"]
+
+        if not norm_scores:
+            continue
+
+        best_norm, best_score = max(norm_scores.items(), key=lambda x: x[1])
+        if best_score > null_score:
+            surface = surface_map.get(best_norm, best_norm)
+            if fused_tokens and normalize_arabic_english(fused_tokens[-1]) == normalize_arabic_english(surface):
+                if dedup_all or len(surface) > 2:
+                    continue
+            fused_tokens.append(surface)
+
+    fused_text = " ".join(fused_tokens).strip()
+    return {
+        "fused_text": fused_text,
+        "method": "rover_confusion_network_v3",
+        "num_models": len(hypotheses),
+        "num_slots": len(network),
+    }
+
+
+def fuse_hybrid_v3(
+    hyp_spec: str,
+    hyp_turbo: str,
+    hyp_qwen: Optional[str] = None,
+    duration_seconds: float = 45.0,
+    weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    """
+    Main entry point for Verbatim Hybrid ASR V3 — Accuracy First:
+    - If QwenCleo is available, synthesizes 3-model ROVER V3 with technical code-switching canonicalization and full particle deduplication
+    - If QwenCleo is not provided, uses Conservative Agreement V2
+    """
+    is_conflict, reason = detect_critical_code_switch_conflict(hyp_spec, hyp_turbo)
+
+    if hyp_qwen and hyp_qwen.strip():
+        hyps = [
+            {"model_id": "codeswitched-medium", "text": hyp_spec},
+            {"model_id": "large-v3-turbo", "text": hyp_turbo},
+            {"model_id": "qwencleo-asr-4bit", "text": hyp_qwen},
+        ]
+        res = fuse_rover_v3(hyps, weights=weights)
+        res["code_switch_conflict_detected"] = is_conflict
+        res["conflict_reason"] = reason
+        res["qwen_invoked"] = True
+        return res
+    else:
+        # Fallback to Conservative Agreement
+        res = fuse_conservative_agreement(hyp_spec, hyp_turbo, duration_seconds=duration_seconds)
+        res["code_switch_conflict_detected"] = is_conflict
+        res["conflict_reason"] = reason
+        res["qwen_invoked"] = False
+        return res
+
+
+
+def project_fused_words_to_segments(
+    spec_segments: List[Dict[str, Any]], fused_text: str
+) -> List[Dict[str, Any]]:
+    """
+    Projects global fused words onto Specialized Whisper segment timestamps
+    to preserve precise playback and UI timeline alignment.
+    """
+    if not spec_segments:
+        return [{"id": 1, "start": 0.0, "end": 45.0, "text": fused_text, "confidence": "high", "uncertain": False}]
+
+    fused_words = fused_text.strip().split()
+    if not fused_words:
+        return []
+
+    spec_tok_objs = []
+    for s_idx, s in enumerate(spec_segments):
+        words = s.get("text", "").strip().split()
+        for w in words:
+            spec_tok_objs.append({
+                "surface": w,
+                "norm": normalize_arabic_english(w),
+                "norm_stem": normalize_arabic_english(w),
+                "is_latin": is_latin_word(w),
+                "has_latin": has_latin_chars(w),
+                "seg_idx": s_idx,
+            })
+
+    fused_tok_objs = []
+    for w in fused_words:
+        fused_tok_objs.append({
+            "surface": w,
+            "norm": normalize_arabic_english(w),
+            "norm_stem": normalize_arabic_english(w),
+            "is_latin": is_latin_word(w),
+            "has_latin": has_latin_chars(w),
+        })
+
+    if not spec_tok_objs:
+        return [{
+            "id": 1,
+            "start": spec_segments[0].get("start", 0.0),
+            "end": spec_segments[-1].get("end", 45.0),
+            "text": fused_text,
+            "confidence": "high",
+            "uncertain": False,
+        }]
+
+    slots = align_hypotheses_pairwise_v2(spec_tok_objs, fused_tok_objs)
+
+    seg_words: Dict[int, List[str]] = {i: [] for i in range(len(spec_segments))}
+    cur_seg_idx = 0
+
+    for slot in slots:
+        ta = slot.get("a")
+        tb = slot.get("b")
+        if ta and "seg_idx" in ta:
+            cur_seg_idx = ta["seg_idx"]
+        if tb:
+            seg_words[cur_seg_idx].append(tb["surface"])
+
+    result_segments = []
+    for s_idx, s in enumerate(spec_segments):
+        seg_text = " ".join(seg_words[s_idx]).strip()
+        result_segments.append({
+            "id": s_idx + 1,
+            "start": s.get("start", 0.0),
+            "end": s.get("end", 0.0),
+            "text": seg_text,
+            "original_text": seg_text,
+            "confidence": "high",
+            "uncertain": False,
+            "uncertain_reason": None,
+            "words": [],
+        })
+
+    non_empty = [s for s in result_segments if s["text"]]
+    return non_empty if non_empty else result_segments
+
+

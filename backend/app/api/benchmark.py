@@ -967,7 +967,8 @@ def get_latest_results(sample_id: str = Query("dev_0_103")):
 def run_qwencleo_benchmark(active_audio: Path, duration: float, device_mode: str) -> Dict[str, Any]:
     """
     Executes QwenCleo 4-bit inference in an isolated subprocess using experimental_venv.
-    Guarantees zero dependency collision with production Faster-Whisper and complete VRAM release.
+    Guarantees zero dependency collision with production Faster-Whisper, complete VRAM release,
+    and strict timeout protection.
     """
     project_root = Path(__file__).resolve().parent.parent.parent.parent
     exp_py = project_root / "experimental_venv" / "Scripts" / "python.exe"
@@ -993,13 +994,21 @@ def run_qwencleo_benchmark(active_audio: Path, duration: float, device_mode: str
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
         if proc.returncode != 0 or not temp_out.exists():
             err_msg = proc.stderr.strip() or proc.stdout.strip() or f"Process exited with code {proc.returncode}"
-            raise RuntimeError(f"QwenCleo execution failed: {err_msg}")
+            logger.warning("QwenCleo standalone execution failed: %s", err_msg)
+            return {"status": "error", "error": err_msg, "text": ""}
 
         result_data = json.loads(temp_out.read_text(encoding="utf-8"))
         if result_data.get("status") == "error":
-            raise RuntimeError(result_data.get("error", "Unknown error in QwenCleo runner"))
+            logger.warning("QwenCleo runner returned error: %s", result_data.get("error"))
+            return {"status": "error", "error": result_data.get("error"), "text": ""}
 
         return result_data
+    except subprocess.TimeoutExpired:
+        logger.warning("QwenCleo standalone execution timed out after 120s.")
+        return {"status": "timeout", "error": "Timeout after 120s", "text": ""}
+    except Exception as e:
+        logger.warning("QwenCleo execution exception: %s", e)
+        return {"status": "error", "error": str(e), "text": ""}
     finally:
         if temp_out.exists():
             temp_out.unlink(missing_ok=True)
@@ -1081,6 +1090,38 @@ def run_benchmark(req: BenchmarkRunRequest):
                 pred_text = qwen_res.get("text", "")
                 device_used = qwen_res.get("device", "cuda")
                 compute_used = qwen_res.get("compute", "4-bit NF4")
+                cuda_fallback = False
+                dev_transitions = []
+                rep_detected = 0
+                rep_resolved = 0
+            elif model_id == "hybrid-v3":
+                from app.transcription.hybrid_orchestrator import run_hybrid_asr_pipeline
+                hybrid_res = run_hybrid_asr_pipeline(
+                    audio_path=active_audio,
+                    duration_seconds=duration,
+                    device_mode=req.device_mode,
+                    include_qwencleo=True,
+                )
+                elapsed = time.time() - t0
+                pred_text = hybrid_res["fusion_hypotheses"]["hybrid_v3"]["text"]
+                device_used = "cuda"
+                compute_used = "Hybrid V3 Fusion (ROVER V3 + QwenCleo Adjudicator)"
+                cuda_fallback = False
+                dev_transitions = []
+                rep_detected = 0
+                rep_resolved = 0
+            elif model_id == "hybrid-v2":
+                from app.transcription.hybrid_orchestrator import run_hybrid_asr_pipeline
+                hybrid_res = run_hybrid_asr_pipeline(
+                    audio_path=active_audio,
+                    duration_seconds=duration,
+                    device_mode=req.device_mode,
+                    include_qwencleo=True,
+                )
+                elapsed = time.time() - t0
+                pred_text = hybrid_res["fusion_hypotheses"]["hybrid_v2"]["text"]
+                device_used = "cuda"
+                compute_used = "Hybrid V2 Fusion (ROVER V2)"
                 cuda_fallback = False
                 dev_transitions = []
                 rep_detected = 0

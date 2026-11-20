@@ -61,7 +61,7 @@ def get_model_dir(model_id: str) -> Path:
 
 
 def is_model_downloaded(model_id: str) -> bool:
-    if model_id == "hybrid-v1":
+    if model_id in ("hybrid-v1", "hybrid-v2", "hybrid-v3"):
         return is_model_downloaded("codeswitched-medium") and is_model_downloaded("large-v3-turbo")
     if model_id == "codeswitched-medium-recovery":
         return is_model_downloaded("codeswitched-medium")
@@ -80,7 +80,7 @@ def is_model_downloaded(model_id: str) -> bool:
 
 
 def get_model_folder_size_gb(model_id: str) -> float:
-    if model_id == "hybrid-v1":
+    if model_id in ("hybrid-v1", "hybrid-v2", "hybrid-v3"):
         return round(get_model_folder_size_gb("codeswitched-medium") + get_model_folder_size_gb("large-v3-turbo"), 2)
     if model_id == "codeswitched-medium-recovery":
         return get_model_folder_size_gb("codeswitched-medium")
@@ -104,8 +104,8 @@ def download_model(model_id: str, progress_callback: Optional[Callable[[float, s
     if model_id not in SUPPORTED_MODELS:
         raise ValueError(f"Unknown model identifier: {model_id}")
 
-    if model_id == "hybrid-v1":
-        raise RuntimeError("Hybrid ASR V1 combines existing installed models and does not require separate download.")
+    if model_id in ("hybrid-v1", "hybrid-v2", "hybrid-v3"):
+        raise RuntimeError(f"Hybrid ASR model {model_id} combines existing installed models and does not require separate download.")
 
     if model_id == "qwencleo-asr-4bit":
         raise RuntimeError(
@@ -267,6 +267,18 @@ def load_whisper_model(
         try:
             if progress_callback:
                 progress_callback(0.15, f"Loading AI model ({model_id} on {device.upper()})...")
+
+            # Enforce sequential GPU safety on RTX 3050 (4GB VRAM):
+            # Guarantee QwenCleo persistent worker VRAM is 100% released before Whisper allocates CUDA memory
+            if device == "cuda":
+                try:
+                    from app.transcription.qwencleo_client import get_qwencleo_client
+                    qw_client = get_qwencleo_client()
+                    if qw_client.is_alive():
+                        logger.info("Releasing QwenCleo worker VRAM before loading Faster-Whisper on CUDA...")
+                        qw_client.shutdown()
+                except Exception as qw_rel_err:
+                    logger.debug("QwenCleo release check note: %s", qw_rel_err)
 
             logger.info("Initializing WhisperModel: %s | device=%s | compute=%s", model_id, device, compute)
             model = WhisperModel(
@@ -519,6 +531,25 @@ def run_transcription_pipeline(
         enhance=enhance_audio,
         progress_callback=progress_callback,
     )
+
+    # Route Hybrid ASR Models to Dedicated Multi-Model Orchestrator
+    if model_id.startswith("hybrid"):
+        from app.transcription.hybrid_orchestrator import run_hybrid_transcription
+        return run_hybrid_transcription(
+            input_path=inference_audio,
+            job_id=job_id,
+            job_dir=job_dir,
+            source_meta=source_meta,
+            model_id=model_id,
+            language=language,
+            device_mode=device_mode,
+            accuracy_mode=accuracy_mode,
+            verbatim_mode=verbatim_mode,
+            enhance_audio=enhance_audio,
+            vad_filter=vad_filter,
+            vocabulary_hints=vocabulary_hints,
+            progress_callback=progress_callback,
+        )
 
     # Stage C: Load AI Model
     model, actual_device, actual_compute = load_whisper_model(

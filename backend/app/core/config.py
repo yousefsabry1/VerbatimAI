@@ -98,7 +98,24 @@ SUPPORTED_MODELS = {
         "approx_download_gb": 0.0,
         "recommended_for": "Multi-model fusion combining Specialized Whisper Medium and Whisper Large-v3-Turbo",
         "is_experimental": True,
-        "benchmark_only": True,
+    },
+    "hybrid-v2": {
+        "id": "hybrid-v2",
+        "name": "Verbatim Hybrid ASR V2 (Experimental)",
+        "repo": "verbatim/hybrid-asr-v2",
+        "approx_vram_gb": 3.0,
+        "approx_download_gb": 0.0,
+        "recommended_for": "Optimized Multi-Model Fusion with transliteration mapping, missing-word protection, and selective arbiter",
+        "is_experimental": True,
+    },
+    "hybrid-v3": {
+        "id": "hybrid-v3",
+        "name": "Verbatim Hybrid ASR V3 — Accuracy First (Experimental)",
+        "repo": "verbatim/hybrid-asr-v3",
+        "approx_vram_gb": 3.0,
+        "approx_download_gb": 0.0,
+        "recommended_for": "Accuracy-First Multi-Model Fusion: Full-spectrum particle deduplication, technical code-switching canonicalization, and calibrated ROVER scoring",
+        "is_experimental": True,
     },
 }
 

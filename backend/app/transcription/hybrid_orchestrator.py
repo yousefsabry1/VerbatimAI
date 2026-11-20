@@ -17,7 +17,7 @@ import hashlib
 import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Callable
 
 from app.core.config import STORAGE_DIR, MODELS_DIR
 
@@ -35,6 +35,19 @@ from app.transcription.hybrid_fusion import (
     route_contextual_segments,
     fuse_selective_three_model,
     calculate_oracle_upper_bound,
+    fuse_rover_v2,
+    fuse_hybrid_v2,
+    fuse_rover_v3,
+    fuse_hybrid_v3,
+    detect_critical_code_switch_conflict,
+    project_fused_words_to_segments,
+)
+from app.exports.formatters import (
+    generate_timestamped_txt,
+    generate_clean_txt,
+    generate_srt,
+    generate_vtt,
+    generate_json_export,
 )
 
 logger = logging.getLogger("verbatim.hybrid_orchestrator")
@@ -76,7 +89,7 @@ def run_model_inference_cached(
     device_mode: str = "auto",
     language: Optional[str] = None,
     beam_size: int = 5,
-    condition_on_previous_text: bool = False,
+    condition_on_previous_text: bool = True,
     vad_filter: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -227,7 +240,7 @@ def run_hybrid_asr_pipeline(
         audio_path=audio_path,
         model_id="codeswitched-medium",
         device_mode=device_mode,
-        condition_on_previous_text=False,
+        condition_on_previous_text=True,
     )
     results["models"]["codeswitched-medium"] = res_spec
 
@@ -237,7 +250,7 @@ def run_hybrid_asr_pipeline(
         audio_path=audio_path,
         model_id="large-v3-turbo",
         device_mode=device_mode,
-        condition_on_previous_text=False,
+        condition_on_previous_text=True,
     )
     results["models"]["large-v3-turbo"] = res_turbo
 
@@ -285,26 +298,24 @@ def run_hybrid_asr_pipeline(
         "is_oracle": False,
     }
 
-    # C. ROVER Confusion Network Fusion
-    rover_hyps = [
+    # C. ROVER Confusion Network Fusion (Pure 2-Model: Spec + Turbo)
+    w_spec = weights.get("codeswitched-medium", 1.20) if weights else 1.20
+    w_turbo = weights.get("large-v3-turbo", 1.0) if weights else 1.0
+    rover_2m_hyps = [
         {"model_id": "codeswitched-medium", "text": txt_spec},
         {"model_id": "large-v3-turbo", "text": txt_turbo},
     ]
-    if txt_qwen:
-        rover_hyps.append({"model_id": "qwencleo-asr-4bit", "text": txt_qwen})
-
-    rover_res = fuse_rover(rover_hyps, weights=weights)
+    rover_2m_weights = {"codeswitched-medium": w_spec, "large-v3-turbo": w_turbo}
+    rover_2m_res = fuse_rover(rover_2m_hyps, weights=rover_2m_weights)
     results["fusion_hypotheses"]["rover_confusion_network"] = {
         "algorithm": "rover_confusion_network",
-        "name": "ROVER Confusion Network",
-        "text": rover_res["fused_text"],
-        "metadata": rover_res,
+        "name": "ROVER Confusion Network (2-Model: Spec + Turbo)",
+        "text": rover_2m_res["fused_text"],
+        "metadata": rover_2m_res,
         "is_oracle": False,
     }
 
     # D. Calibrated Weighted Fusion
-    w_spec = weights.get("codeswitched-medium", 1.20) if weights else 1.20
-    w_turbo = weights.get("large-v3-turbo", 1.0) if weights else 1.0
     weighted_res = fuse_weighted(txt_spec, txt_turbo, weight_spec=w_spec, weight_turbo=w_turbo, duration_seconds=duration_seconds)
     results["fusion_hypotheses"]["weighted_fusion"] = {
         "algorithm": "weighted_fusion",
@@ -324,8 +335,28 @@ def run_hybrid_asr_pipeline(
         "is_oracle": False,
     }
 
-    # F. Selective Three-Model Fusion (if QwenCleo available)
+    # F. Three-Model ROVER & Selective Fusion (if QwenCleo available)
     if txt_qwen:
+        rover_3m_hyps = [
+            {"model_id": "codeswitched-medium", "text": txt_spec},
+            {"model_id": "large-v3-turbo", "text": txt_turbo},
+            {"model_id": "qwencleo-asr-4bit", "text": txt_qwen},
+        ]
+        w_qwen = weights.get("qwencleo-asr-4bit", 0.90) if weights else 0.90
+        rover_3m_weights = {
+            "codeswitched-medium": w_spec,
+            "large-v3-turbo": w_turbo,
+            "qwencleo-asr-4bit": w_qwen,
+        }
+        rover_3m_res = fuse_rover(rover_3m_hyps, weights=rover_3m_weights)
+        results["fusion_hypotheses"]["rover_three_model"] = {
+            "algorithm": "rover_three_model",
+            "name": "ROVER Fusion (3-Model: Spec + Turbo + QwenCleo)",
+            "text": rover_3m_res["fused_text"],
+            "metadata": rover_3m_res,
+            "is_oracle": False,
+        }
+
         three_res = fuse_selective_three_model(txt_spec, txt_turbo, hyp_qwen=txt_qwen, duration_seconds=duration_seconds)
         results["fusion_hypotheses"]["selective_three_model"] = {
             "algorithm": "selective_three_model",
@@ -352,5 +383,279 @@ def run_hybrid_asr_pipeline(
             "is_oracle": True,
         }
 
+    # H. Verbatim Hybrid ASR V2
+    hybrid_v2_res = fuse_hybrid_v2(
+        txt_spec, txt_turbo, hyp_qwen=txt_qwen, duration_seconds=duration_seconds, weights=weights
+    )
+    results["fusion_hypotheses"]["hybrid_v2"] = {
+        "algorithm": "hybrid_v2",
+        "name": "Verbatim Hybrid ASR V2 (Optimized Multi-Model Fusion)",
+        "text": hybrid_v2_res["fused_text"],
+        "metadata": hybrid_v2_res,
+        "is_oracle": False,
+    }
+
+    # I. Verbatim Hybrid ASR V3 (Accuracy-First)
+    hybrid_v3_res = fuse_hybrid_v3(
+        txt_spec, txt_turbo, hyp_qwen=txt_qwen, duration_seconds=duration_seconds, weights=weights
+    )
+    results["fusion_hypotheses"]["hybrid_v3"] = {
+        "algorithm": "hybrid_v3",
+        "name": "Verbatim Hybrid ASR V3 (Accuracy-First Multi-Model Fusion)",
+        "text": hybrid_v3_res["fused_text"],
+        "metadata": hybrid_v3_res,
+        "is_oracle": False,
+    }
+
     results["total_elapsed_seconds"] = round(time.time() - t_start, 2)
     return results
+
+
+def run_hybrid_transcription(
+    input_path: Path,
+    job_id: str,
+    job_dir: Path,
+    source_meta: Dict[str, Any],
+    model_id: str = "hybrid-v1",
+    language: Optional[str] = None,
+    device_mode: str = "auto",
+    accuracy_mode: str = "balanced",
+    verbatim_mode: str = "strict",
+    enhance_audio: bool = False,
+    vad_filter: bool = True,
+    vocabulary_hints: Optional[str] = None,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    End-to-end production transcription pipeline for Verbatim Hybrid ASR (V1 and V2).
+    Coordinates sequential model inference, VRAM hygiene, hypothesis fusion,
+    timestamp projection, and multi-format subtitle generation.
+    """
+    from app.api.benchmark import run_qwencleo_benchmark
+
+    t_start = time.time()
+    total_duration = max(float(source_meta.get("duration") or 45.0), 1.0)
+    prompt = vocabulary_hints.strip() if (vocabulary_hints and vocabulary_hints.strip()) else None
+
+    # Step 1: Model 1 — Specialized Whisper Medium
+    if progress_callback:
+        progress_callback(0.12, "Hybrid Pass 1/3: Transcribing with Specialized Whisper Medium (CUDA)...")
+
+    clear_loaded_models_cache()
+    model_spec, act_dev, act_comp = load_whisper_model(
+        model_id="codeswitched-medium",
+        device_mode=device_mode,
+        compute_mode="auto",
+        progress_callback=progress_callback,
+    )
+
+    gen_spec, info_spec = model_spec.transcribe(
+        str(input_path),
+        language="ar",
+        initial_prompt=prompt,
+        beam_size=5,
+        condition_on_previous_text=True,
+        vad_filter=vad_filter,
+        repetition_penalty=1.10,
+        no_repeat_ngram_size=3,
+    )
+
+    spec_segments = []
+    spec_text_parts = []
+    for s in gen_spec:
+        txt = s.text.strip()
+        if txt:
+            spec_text_parts.append(txt)
+            spec_segments.append({
+                "start": round(s.start, 2),
+                "end": round(s.end, 2),
+                "text": txt,
+            })
+    spec_text = " ".join(spec_text_parts).strip()
+
+    # Step 2: Model 2 — Large-v3-Turbo
+    if progress_callback:
+        progress_callback(0.42, "Hybrid Pass 2/3: Transcribing with Whisper Large-v3-Turbo (CUDA)...")
+
+    clear_loaded_models_cache()
+    model_turbo, _, _ = load_whisper_model(
+        model_id="large-v3-turbo",
+        device_mode=device_mode,
+        compute_mode="auto",
+        progress_callback=progress_callback,
+    )
+
+    gen_turbo, _ = model_turbo.transcribe(
+        str(input_path),
+        language="ar",
+        initial_prompt=prompt,
+        beam_size=4,
+        condition_on_previous_text=True,
+        vad_filter=vad_filter,
+        repetition_penalty=1.10,
+        no_repeat_ngram_size=3,
+    )
+
+    turbo_segments = []
+    turbo_text_parts = []
+    for s in gen_turbo:
+        txt = s.text.strip()
+        if txt:
+            turbo_text_parts.append(txt)
+            turbo_segments.append({
+                "start": round(s.start, 2),
+                "end": round(s.end, 2),
+                "text": txt,
+            })
+    turbo_text = " ".join(turbo_text_parts).strip()
+    clear_loaded_models_cache()
+
+    # Step 3: Model 3 — QwenCleo 4-bit (Adaptive / Selective)
+    qwen_text = ""
+    is_conflict = False
+    conflict_reason = "none"
+
+    if model_id in ("hybrid-v2", "hybrid-v3"):
+        # Hybrid V2/V3: Intelligent Selective Arbiter
+        is_conflict, conflict_reason = detect_critical_code_switch_conflict(spec_text, turbo_text)
+        if is_conflict:
+            if progress_callback:
+                progress_callback(0.70, "Hybrid Pass 3/3: Evaluating code-switching with QwenCleo-ASR (4-bit)...")
+            try:
+                qwen_res = run_qwencleo_benchmark(str(input_path), total_duration, "cuda")
+                qwen_text = qwen_res.get("text", "")
+            except Exception as e:
+                logger.warning("QwenCleo selective inference encountered warning: %s", e)
+                qwen_text = ""
+        else:
+            if progress_callback:
+                progress_callback(0.75, "High Model Agreement Confirmed: Skipping secondary QwenCleo pass...")
+    else:
+        # Hybrid V1: Full Three-Model Execution
+        if progress_callback:
+            progress_callback(0.70, "Hybrid Pass 3/3: Evaluating code-switching with QwenCleo-ASR (4-bit)...")
+        try:
+            qwen_res = run_qwencleo_benchmark(str(input_path), total_duration, "cuda")
+            qwen_text = qwen_res.get("text", "")
+            is_conflict = True
+            conflict_reason = "hybrid_v1_full"
+        except Exception as e:
+            logger.warning("QwenCleo inference encountered warning: %s", e)
+            qwen_text = ""
+
+    # Step 4: Multi-Model Fusion Synthesis
+    if progress_callback:
+        progress_callback(0.88, "Synthesizing multi-model fusion & aligning segments...")
+
+    if model_id == "hybrid-v3":
+        fusion_res = fuse_hybrid_v3(
+            spec_text, turbo_text, hyp_qwen=qwen_text, duration_seconds=total_duration
+        )
+        fused_text = fusion_res["fused_text"]
+    elif model_id == "hybrid-v2":
+        fusion_res = fuse_hybrid_v2(
+            spec_text, turbo_text, hyp_qwen=qwen_text, duration_seconds=total_duration
+        )
+        fused_text = fusion_res["fused_text"]
+    else:
+        if qwen_text:
+            hyps = [
+                {"model_id": "codeswitched-medium", "text": spec_text},
+                {"model_id": "large-v3-turbo", "text": turbo_text},
+                {"model_id": "qwencleo-asr-4bit", "text": qwen_text},
+            ]
+            w = {"codeswitched-medium": 1.20, "large-v3-turbo": 1.0, "qwencleo-asr-4bit": 0.90}
+            fusion_res = fuse_rover(hyps, weights=w)
+        else:
+            hyps = [
+                {"model_id": "codeswitched-medium", "text": spec_text},
+                {"model_id": "large-v3-turbo", "text": turbo_text},
+            ]
+            w = {"codeswitched-medium": 1.20, "large-v3-turbo": 1.0}
+            fusion_res = fuse_rover(hyps, weights=w)
+        fused_text = fusion_res["fused_text"]
+
+    # Step 5: Project Fused Words to Natural Segments
+    segments_list = project_fused_words_to_segments(spec_segments, fused_text)
+    if not segments_list:
+        segments_list = [{
+            "id": 1,
+            "start": 0.0,
+            "end": total_duration,
+            "text": fused_text,
+            "original_text": fused_text,
+            "confidence": "high",
+            "uncertain": False,
+            "uncertain_reason": None,
+            "words": [],
+        }]
+
+    # Step 6: Assembly & Export File Generation
+    if progress_callback:
+        progress_callback(0.94, "Formatting subtitle files & exports...")
+
+    timestamped_txt = generate_timestamped_txt(segments_list)
+    clean_txt = generate_clean_txt(segments_list)
+    srt_content = generate_srt(segments_list)
+    vtt_content = generate_vtt(segments_list)
+
+    metadata = {
+        "job_id": job_id,
+        "input_filename": input_path.name,
+        "duration": total_duration,
+        "duration_formatted": source_meta.get("duration_formatted", ""),
+        "detected_language": "ar",
+        "language_probability": 1.0,
+        "model_used": model_id,
+        "device_used": act_dev,
+        "compute_used": act_comp,
+        "initial_device": act_dev,
+        "cuda_fallback": False,
+        "accuracy_mode": accuracy_mode,
+        "verbatim_mode": verbatim_mode,
+        "enhanced": enhance_audio,
+        "vad": vad_filter,
+        "hybrid_metadata": {
+            "fusion_method": fusion_res.get("method", "hybrid_fusion"),
+            "code_switch_conflict_detected": is_conflict,
+            "conflict_reason": conflict_reason,
+            "qwen_invoked": bool(qwen_text),
+            "models_raw": {
+                "codeswitched-medium": spec_text,
+                "large-v3-turbo": turbo_text,
+                "qwencleo-asr-4bit": qwen_text,
+            },
+        },
+    }
+
+    json_content = generate_json_export(job_id, segments_list, metadata)
+
+    txt_file = job_dir / "transcript.txt"
+    clean_file = job_dir / "clean_transcript.txt"
+    srt_file = job_dir / "subtitles.srt"
+    vtt_file = job_dir / "subtitles.vtt"
+    json_file = job_dir / "transcript.json"
+
+    txt_file.write_text(timestamped_txt, encoding="utf-8")
+    clean_file.write_text(clean_txt, encoding="utf-8")
+    srt_file.write_text(srt_content, encoding="utf-8")
+    vtt_file.write_text(vtt_content, encoding="utf-8")
+    json_file.write_text(json_content, encoding="utf-8")
+
+    return {
+        "job_id": job_id,
+        "original_text": fused_text,
+        "clean_text": clean_txt,
+        "segments": segments_list,
+        "srt_content": srt_content,
+        "vtt_content": vtt_content,
+        "output_files": {
+            "txt": str(txt_file),
+            "clean_txt": str(clean_file),
+            "srt": str(srt_file),
+            "vtt": str(vtt_file),
+            "json": str(json_file),
+        },
+        "metadata": metadata,
+    }
+
