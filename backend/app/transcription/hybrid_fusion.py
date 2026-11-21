@@ -1203,8 +1203,9 @@ def fuse_rover_v3(
 
     fused_tokens: List[str] = []
     for slot in network:
-        norm_scores: Dict[str, float] = {}
-        surface_map: Dict[str, str] = {}
+        cluster_scores: Dict[str, float] = {}
+        cluster_surfaces: Dict[str, Dict[str, float]] = {}
+        cluster_supporting_models: Dict[str, List[str]] = {}
         null_score = 0.0
 
         for cand in slot:
@@ -1221,27 +1222,41 @@ def fuse_rover_v3(
                     null_score += w
             else:
                 n = tok["norm"]
-                if not tok.get("has_latin") and n in TRANSLITERATION_MAP_V3:
-                    n = TRANSLITERATION_MAP_V3[n]
+                # Transliteration mapping is used strictly for clustering/alignment
+                cluster_key = TRANSLITERATION_MAP_V3.get(n, n)
 
                 boost = latin_boost if (tok.get("has_latin") or n in TRANSLITERATION_MAP_V3.values()) else 0.0
                 score = w + boost
-                norm_scores[n] = norm_scores.get(n, 0.0) + score
-                if tok.get("has_latin"):
-                    surface_map[n] = tok["surface"]
-                elif n not in surface_map:
-                    surface_map[n] = tok["surface"]
+                cluster_scores[cluster_key] = cluster_scores.get(cluster_key, 0.0) + score
 
-        if not norm_scores:
+                if cluster_key not in cluster_supporting_models:
+                    cluster_supporting_models[cluster_key] = []
+                cluster_supporting_models[cluster_key].append(m_id)
+
+                if cluster_key not in cluster_surfaces:
+                    cluster_surfaces[cluster_key] = {}
+                surface = tok["surface"]
+                cluster_surfaces[cluster_key][surface] = cluster_surfaces[cluster_key].get(surface, 0.0) + score
+
+        if not cluster_scores:
             continue
 
-        best_norm, best_score = max(norm_scores.items(), key=lambda x: x[1])
+        best_cluster, best_score = max(cluster_scores.items(), key=lambda x: x[1])
         if best_score > null_score:
-            surface = surface_map.get(best_norm, best_norm)
-            if fused_tokens and normalize_arabic_english(fused_tokens[-1]) == normalize_arabic_english(surface):
-                if dedup_all or len(surface) > 2:
+            # Evidence-based surface selection: pick the surface form with the highest model vote!
+            best_surface = max(cluster_surfaces[best_cluster].items(), key=lambda x: x[1])[0]
+
+            # Verbatim-safe deduplication:
+            # If the current word repeats the immediately preceding word:
+            # Is it supported by MULTIPLE models (genuine repetition)? Or only ONE model (stutter loop)?
+            num_supporters = len(cluster_supporting_models[best_cluster])
+            if fused_tokens and normalize_arabic_english(fused_tokens[-1]) == normalize_arabic_english(best_surface):
+                # If only 1 model produced this repeated token while others were null, it is an unconfirmed hallucination loop!
+                # If 2 or more models agreed on this repetition, it is genuine spoken speech!
+                if num_supporters < 2:
                     continue
-            fused_tokens.append(surface)
+
+            fused_tokens.append(best_surface)
 
     fused_text = " ".join(fused_tokens).strip()
     return {

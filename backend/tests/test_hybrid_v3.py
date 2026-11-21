@@ -22,17 +22,26 @@ from app.evaluation.metrics import normalize_arabic_english, calculate_wer_cer
 
 
 def test_particle_deduplication():
-    """Verify that consecutive duplicate particles are eliminated regardless of length."""
-    hyps = [
+    """Verify that single-model stutter loops are suppressed while genuine consensus repetitions are preserved."""
+    # Case 1: Single model hallucination loop (only Specialized stutters 'في في' and 'ال ال')
+    hyps_hallucination = [
         {"model_id": "codeswitched-medium", "text": "في في هذا ال ال ايفنت"},
         {"model_id": "large-v3-turbo", "text": "في هذا ال event"},
         {"model_id": "qwencleo-asr-4bit", "text": "في هذا ال event"},
     ]
-    res = fuse_rover_v3(hyps)
-    tokens = res["fused_text"].split()
-    # Check that 'في في' and 'ال ال' are deduplicated
-    assert "في في" not in res["fused_text"]
-    assert "ال ال" not in res["fused_text"]
+    res_loop = fuse_rover_v3(hyps_hallucination)
+    assert "في في" not in res_loop["fused_text"]
+    assert "ال ال" not in res_loop["fused_text"]
+
+    # Case 2: Genuine spoken repetitions (all models agree on 'لا لا' or 'هو هو')
+    hyps_genuine = [
+        {"model_id": "codeswitched-medium", "text": "لا لا مش هينفع هو هو نفس الشخص"},
+        {"model_id": "large-v3-turbo", "text": "لا لا مش هينفع هو هو نفس الشخص"},
+        {"model_id": "qwencleo-asr-4bit", "text": "لا لا مش هينفع هو هو نفس الشخص"},
+    ]
+    res_genuine = fuse_rover_v3(hyps_genuine)
+    assert "لا لا" in res_genuine["fused_text"], "Genuine spoken repetition 'لا لا' must be preserved!"
+    assert "هو هو" in res_genuine["fused_text"], "Genuine spoken repetition 'هو هو' must be preserved!"
 
 
 def test_transliteration_canonicalization_v3():
@@ -106,5 +115,5 @@ def test_certified_benchmark_accuracy_v3():
         tot_errors += e
 
     assert tot_ref_words == 698
-    # Hybrid V3 must achieve 308 errors (significantly lower than V2's 321 and Specialized's 347)
-    assert tot_errors <= 308
+    # Hybrid V3 with verbatim safety achieves 311 errors (significantly lower than V2's 321 and Specialized's 347)
+    assert tot_errors <= 311
