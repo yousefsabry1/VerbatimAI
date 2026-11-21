@@ -1,6 +1,12 @@
 import re
 from typing import Optional, Dict, Any, List, Tuple
 
+try:
+    from app.transcription.hybrid_fusion import robust_split_transcript
+except ImportError:
+    def robust_split_transcript(text: str) -> List[str]:
+        return text.split()
+
 
 def find_repeated_ngrams(tokens: List[str], min_n: int = 1, max_n: int = 4, min_repeats: int = 4) -> Optional[Dict[str, Any]]:
     """
@@ -79,7 +85,7 @@ def detect_repetition_in_segment(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
 
-    words = text.split()
+    words = robust_split_transcript(text)
     loop_info = find_repeated_ngrams(words, min_n=1, max_n=4, min_repeats=4)
     if loop_info:
         return {

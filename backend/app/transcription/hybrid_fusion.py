@@ -51,15 +51,80 @@ def strip_arabic_clitics(token: str) -> Tuple[str, str]:
     return "", token
 
 
-def tokenize_transcript(text: str) -> List[Dict[str, Any]]:
+def robust_split_transcript(text: str) -> List[str]:
     """
-    Splits text into structured tokens with surface and normalized representations.
+    Robust transcript word splitter that separates punctuation-joined tokens
+    (e.g., 'موسيقى.موسيقى.موسيقى.', 'لا،لا،لا', 'hello.hello.hello')
+    while strictly protecting:
+    - Decimal numbers, percentages, thousands separators (e.g., 3.14, 10,000, 12.5%, ٣.١٤)
+    - Standard abbreviations (e.g., U.S.A., A.I., e.g., i.e., Dr., Ph.D.)
+    - URLs, domains, emails (e.g., verbatim.ai, https://..., test@example.com)
+    - Hyphenated compound terms (e.g., code-switching, large-v3-turbo)
     """
     if not text:
         return []
+
     raw_tokens = text.strip().split()
+    final_tokens: List[str] = []
+    tlds = {"com", "org", "net", "edu", "gov", "io", "ai", "dev", "app", "me"}
+
+    for raw in raw_tokens:
+        # 1. Decimal numbers, percentages, thousands separators (Arabic and English digits)
+        if re.fullmatch(r"[\d\u0660-\u0669]+([.,][\d\u0660-\u0669]+)+%?", raw):
+            final_tokens.append(raw)
+            continue
+
+        # 2. English abbreviations (e.g., U.S.A., A.I., e.g., i.e., Dr., Ph.D.)
+        if re.fullmatch(r"([A-Za-z]\.)+|e\.g\.|i\.e\.|Ph\.D\.|Dr\.", raw, re.IGNORECASE):
+            final_tokens.append(raw)
+            continue
+
+        # 3. URLs, domains, emails
+        if re.search(r"https?://|www\.|@", raw) or any(raw.lower().endswith("." + tld) for tld in tlds):
+            final_tokens.append(raw)
+            continue
+
+        # 4. Hyphenated compound words (e.g., code-switching, large-v3-turbo)
+        if re.fullmatch(r"[A-Za-z0-9]+(-[A-Za-z0-9]+)+", raw):
+            final_tokens.append(raw)
+            continue
+
+        # 5. Intra-token punctuation splitting (Arabic & English punctuation)
+        # Delimiters: . , ، ! ? ؟ ; ؛ / :
+        parts = re.split(r"([.,!?;:\u060C\u061B\u061F/]+)", raw)
+        sub_tokens: List[str] = []
+        for p in parts:
+            if not p:
+                continue
+            if re.fullmatch(r"[.,!?;:\u060C\u061B\u061F/]+", p):
+                if sub_tokens:
+                    sub_tokens[-1] += p
+                else:
+                    sub_tokens.append(p)
+            else:
+                if sub_tokens and re.fullmatch(r"[.,!?;:\u060C\u061B\u061F/]+", sub_tokens[-1]):
+                    sub_tokens[-1] += p
+                else:
+                    sub_tokens.append(p)
+        final_tokens.extend(sub_tokens)
+
+    return final_tokens
+
+
+def tokenize_transcript(text: str) -> List[Dict[str, Any]]:
+    """
+    Splits text into structured tokens with surface and normalized representations.
+    Recognizes punctuation-joined token boundaries while protecting numbers, decimals,
+    abbreviations, URLs, and hyphenated terms.
+    """
+    if not text:
+        return []
+    raw_tokens = robust_split_transcript(text)
     tokens = []
     for idx, raw in enumerate(raw_tokens):
+        # Ignore tokens that are pure punctuation with no alphanumeric or Arabic characters
+        if not re.search(r"[\w\u0600-\u06FF]", raw):
+            continue
         norm = normalize_arabic_english(raw)
         prefix, stem = strip_arabic_clitics(raw)
         norm_prefix, norm_stem = strip_arabic_clitics(norm)
@@ -476,7 +541,7 @@ def score_segment_hypothesis(
     Penalizes severe under-generation (speech omission) and over-generation (repetition/hallucination).
     Awards bonuses for clean Latin code-switching entities.
     """
-    tokens = text.strip().split()
+    tokens = robust_split_transcript(text)
     if not tokens:
         return -100.0
 
