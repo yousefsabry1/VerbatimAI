@@ -48,7 +48,11 @@ backend/storage/models/*
 backend/storage/benchmarks/*
 !backend/storage/benchmarks/.gitkeep
 backend/storage/hybrid_cache/
-!backend/storage/hybrid_cache/.gitkeep
+backend/storage/research_eval/
+!backend/storage/research_eval/.gitkeep
+!backend/storage/hybrid_cache/
+backend/storage/research_eval/
+!backend/storage/research_eval/.gitkeep.gitkeep
 backend/storage/temp/*
 !backend/storage/temp/.gitkeep
 benchmarks/*
