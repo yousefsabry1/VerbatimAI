@@ -348,7 +348,25 @@ def fuse_conservative_agreement(
                 if not spec_over_generating:
                     fused_tokens.append(tb["surface"])
 
-    fused_text = " ".join(fused_tokens).strip()
+    # Clean up subtitle artifacts and clitic duplicates
+    cleaned_tokens: List[str] = []
+    for tok_surf in fused_tokens:
+        clean_s = tok_surf.strip()
+        if any(clean_s.startswith(p) for p in ("ترجمة", "مترجم", "اشترك", "اشتراك", "قنقر", "اللهوة")):
+            continue
+        # Safe sub-word clitic deduplication (only for words >= 4 chars, excluding 'ال')
+        if cleaned_tokens and len(cleaned_tokens[-1]) >= 4 and len(clean_s) >= 4:
+            prev_n = normalize_arabic_english(cleaned_tokens[-1])
+            curr_n = normalize_arabic_english(clean_s)
+            if prev_n != "ال" and curr_n != "ال":
+                if curr_n.startswith(prev_n) and len(curr_n) > len(prev_n):
+                    cleaned_tokens[-1] = clean_s
+                    continue
+                if prev_n.startswith(curr_n) and len(prev_n) > len(curr_n):
+                    continue
+        cleaned_tokens.append(clean_s)
+
+    fused_text = " ".join(cleaned_tokens).strip()
     # Clean up double punctuation or weird spaces
     fused_text = re.sub(r"\s+", " ", fused_text)
     agreement_ratio = agreed_count / max(total_slots, 1)
@@ -866,6 +884,76 @@ TRANSLITERATION_MAP_V3.update({
     "الهيستور": "history",
     "داتابيز": "database",
     "الداتابيز": "database",
+    # General IT / Tech domain transliterations
+    "داتا": "data",
+    "الداتا": "data",
+    "فرونت": "frontend",
+    "الفرونت": "frontend",
+    "فرونتيند": "frontend",
+    "باك": "backend",
+    "الباك": "backend",
+    "باكيند": "backend",
+    "داشبورد": "dashboard",
+    "الداشبورد": "dashboard",
+    "داشبورت": "dashboard",
+    "الداشبورت": "dashboard",
+    "ماركتنج": "marketing",
+    "الماركتنج": "marketing",
+    "اوبريشنز": "operations",
+    "الاوبريشنز": "operations",
+    "اوبريشن": "operations",
+    "الاوبريشن": "operations",
+    "بلانينج": "planning",
+    "البلانينج": "planning",
+    "ميتنج": "meeting",
+    "الميتنج": "meeting",
+    "رفيور": "reviewer",
+    "الرفيور": "reviewer",
+    "ليدر": "leader",
+    "الليدر": "leader",
+    "ديدلاين": "deadline",
+    "الديدلاين": "deadline",
+    "تاسك": "task",
+    "التاسك": "task",
+    "تسق": "task",
+    "فيدباك": "feedback",
+    "الفيدباك": "feedback",
+    "ايديتنج": "editing",
+    "الايديتنج": "editing",
+    "كونتنت": "content",
+    "الكونتنت": "content",
+    "ديزاين": "design",
+    "الديزاين": "design",
+    "سيرفر": "server",
+    "السيرفر": "server",
+    "كلاينت": "client",
+    "الكلاينت": "client",
+    "كود": "code",
+    "الكود": "code",
+    "ريليز": "release",
+    "الريليز": "release",
+    "ابديت": "update",
+    "الابديت": "update",
+    "بروجكت": "project",
+    "البروجكت": "project",
+    "للبروجكت": "project",
+    "بروجيكت": "project",
+    "البروجيكت": "project",
+    "للبروجيكت": "project",
+    "هاردوير": "hardware",
+    "الهاردوير": "hardware",
+    "سوفتوير": "software",
+    "السوفتوير": "software",
+    "تكنولوجي": "technology",
+    "التكنولوجي": "technology",
+    "موبايل": "mobile",
+    "الموبايل": "mobile",
+    "فينير": "veneer",
+    "الفينير": "veneer",
+    "كوتد": "coated",
+    "الكوتد": "coated",
+    "جولدن": "golden",
+    "الجولدن": "golden",
 })
 
 
@@ -874,15 +962,21 @@ def is_transliteration_match(tok_a: Dict[str, Any], tok_b: Dict[str, Any]) -> bo
     """Checks if one token is a known Egyptian Arabic transliteration of an English token."""
     na = tok_a.get("norm_stem") or tok_a.get("norm", "")
     nb = tok_b.get("norm_stem") or tok_b.get("norm", "")
+    fa = tok_a.get("norm", "")
+    fb = tok_b.get("norm", "")
 
-    if TRANSLITERATION_MAP.get(na) == nb or TRANSLITERATION_MAP.get(nb) == na:
-        return True
-    if tok_a.get("has_latin") and not tok_b.get("has_latin"):
-        if TRANSLITERATION_MAP.get(nb) == tok_a.get("norm_stem"):
-            return True
-    elif tok_b.get("has_latin") and not tok_a.get("has_latin"):
-        if TRANSLITERATION_MAP.get(na) == tok_b.get("norm_stem"):
-            return True
+    # Check V3 transliteration map first, fallback to V2
+    for t_map in (TRANSLITERATION_MAP_V3, TRANSLITERATION_MAP):
+        for ka in (na, fa):
+            for kb in (nb, fb):
+                if t_map.get(ka) == kb or t_map.get(kb) == ka:
+                    return True
+                if tok_a.get("has_latin") and not tok_b.get("has_latin"):
+                    if t_map.get(kb) == tok_a.get("norm_stem") or t_map.get(kb) == tok_a.get("norm"):
+                        return True
+                elif tok_b.get("has_latin") and not tok_a.get("has_latin"):
+                    if t_map.get(ka) == tok_b.get("norm_stem") or t_map.get(ka) == tok_b.get("norm"):
+                        return True
     return False
 
 
@@ -890,7 +984,10 @@ def soft_arabic_distance(s1: str, s2: str) -> float:
     """Computes soft distance allowing common colloquial phonetic confusions."""
     if s1 == s2:
         return 0.0
-    rep = [("ص", "س"), ("ط", "ت"), ("ظ", "ز"), ("ض", "د"), ("ة", "ه"), ("ى", "ي"), ("أ", "ا"), ("إ", "ا"), ("آ", "ا")]
+    rep = [
+        ("ص", "س"), ("ط", "ت"), ("ظ", "ز"), ("ض", "د"), ("ذ", "ز"), ("ث", "ت"),
+        ("ة", "ه"), ("ى", "ي"), ("أ", "ا"), ("إ", "ا"), ("آ", "ا")
+    ]
     for a, b in rep:
         s1 = s1.replace(a, b)
         s2 = s2.replace(a, b)
@@ -929,6 +1026,20 @@ def enhanced_token_match_cost(t1: Dict[str, Any], t2: Dict[str, Any]) -> float:
             return 0.25 + 0.1 * dist
 
     if not t1.get("has_latin") and not t2.get("has_latin"):
+        # Check proclitic 'و' / 'ف' stripping across Arabic words
+        n1 = t1.get("norm", "")
+        n2 = t2.get("norm", "")
+        s1 = n1[1:] if (n1.startswith("و") or n1.startswith("ف")) and len(n1) > 2 else n1
+        s2 = n2[1:] if (n2.startswith("و") or n2.startswith("ف")) and len(n2) > 2 else n2
+        if s1 == s2 or s1 == n2 or n1 == s2:
+            return 0.15
+
+        # Check tanwin / accusative alif stripping
+        a1 = s1[:-1] if len(s1) >= 4 and s1.endswith("ا") else s1
+        a2 = s2[:-1] if len(s2) >= 4 and s2.endswith("ا") else s2
+        if a1 == a2:
+            return 0.15
+
         soft_d = soft_arabic_distance(t1.get("norm_stem", ""), t2.get("norm_stem", ""))
         if soft_d < 0.5:
             return soft_d
@@ -982,6 +1093,59 @@ def align_hypotheses_pairwise_v2(
     return slots
 
 
+def align_hypotheses_to_confusion_network(
+    network: List[List[Dict[str, Any]]], other_tokens: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    Dynamic programming alignment between confusion network slots and a new hypothesis tokens,
+    using minimum matching cost across all non-null candidates present in each slot.
+    """
+    n = len(network)
+    m = len(other_tokens)
+    dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+    back = [[(0, 0, "")] * (m + 1) for _ in range(n + 1)]
+
+    for i in range(1, n + 1):
+        dp[i][0] = dp[i - 1][0] + 0.8
+        back[i][0] = (i - 1, 0, "delete_b")
+    for j in range(1, m + 1):
+        dp[0][j] = dp[0][j - 1] + 0.8
+        back[0][j] = (0, j - 1, "delete_a")
+
+    for i in range(1, n + 1):
+        slot = network[i - 1]
+        cands = [c["token"] for c in slot if c["token"] is not None]
+        for j in range(1, m + 1):
+            tb = other_tokens[j - 1]
+            match_cost = min((enhanced_token_match_cost(c, tb) for c in cands), default=1.0)
+
+            cost_sub = dp[i - 1][j - 1] + match_cost
+            cost_del_b = dp[i - 1][j] + 0.8
+            cost_del_a = dp[i][j - 1] + 0.8
+
+            best = min(cost_sub, cost_del_b, cost_del_a)
+            dp[i][j] = best
+
+            if best == cost_sub:
+                action = "match" if match_cost < 0.4 else "substitute"
+                back[i][j] = (i - 1, j - 1, action)
+            elif best == cost_del_b:
+                back[i][j] = (i - 1, j, "delete_b")
+            else:
+                back[i][j] = (i, j - 1, "delete_a")
+
+    alignments = []
+    ci, cj = n, m
+    while ci > 0 or cj > 0:
+        pi, pj, action = back[ci][cj]
+        tb = other_tokens[cj - 1] if cj > pj else None
+        alignments.append({"type": action, "b": tb})
+        ci, cj = pi, pj
+
+    alignments.reverse()
+    return alignments
+
+
 def detect_critical_code_switch_conflict(txt_spec: str, txt_turbo: str) -> Tuple[bool, str]:
     """
     Detects whether Specialized Whisper and Large-v3-Turbo have critical code-switching
@@ -1022,6 +1186,11 @@ def detect_critical_code_switch_conflict(txt_spec: str, txt_turbo: str) -> Tuple
         return True, f"code_switch_mismatches_{code_switch_mismatches}"
     if disagreement_rate > 0.40 and code_switch_mismatches >= 1:
         return True, f"high_disagreement_{disagreement_rate:.2f}"
+    # General Arabic high disagreement threshold (invokes QwenCleo for dialectic disambiguation)
+    if disagreement_rate >= 0.25 and (substitutions + deletions) >= 6:
+        return True, f"high_arabic_disagreement_{disagreement_rate:.2f}"
+    if (substitutions + deletions) >= 10:
+        return True, f"high_mismatch_count_{substitutions + deletions}"
 
     return False, f"low_conflict_rate_{disagreement_rate:.2f}"
 
@@ -1046,13 +1215,20 @@ def fuse_rover_v2(
     if weights is None:
         weights = {"codeswitched-medium": 1.25, "large-v3-turbo": 1.0, "qwencleo-asr-4bit": 0.95}
 
-    base_toks = tokenize_transcript(hypotheses[0]["text"])
-    base_id = hypotheses[0]["model_id"]
+    processed_hyps = []
+    for h in hypotheses:
+        txt = h.get("text", "")
+        for p, rep in (("ع شان", "عشان"), ("عشن", "عشان"), ("انتعايز", "انت عايز")):
+            txt = txt.replace(p, rep)
+        processed_hyps.append({"model_id": h.get("model_id", "unknown"), "text": txt})
+
+    base_toks = tokenize_transcript(processed_hyps[0]["text"])
+    base_id = processed_hyps[0]["model_id"]
     network: List[List[Dict[str, Any]]] = []
     for t in base_toks:
         network.append([{"model_id": base_id, "token": t}])
 
-    for h in hypotheses[1:]:
+    for h in processed_hyps[1:]:
         m_id = h["model_id"]
         other_tokens = tokenize_transcript(h["text"])
         if not other_tokens:
@@ -1060,16 +1236,7 @@ def fuse_rover_v2(
                 slot.append({"model_id": m_id, "token": None})
             continue
 
-        net_tokens = []
-        for slot in network:
-            first_tok = None
-            for cand in slot:
-                if cand["token"] is not None:
-                    first_tok = cand["token"]
-                    break
-            net_tokens.append(first_tok if first_tok else {"norm": "", "norm_stem": "", "is_latin": False, "has_latin": False})
-
-        slots_align = align_hypotheses_pairwise_v2(net_tokens, other_tokens)
+        slots_align = align_hypotheses_to_confusion_network(network, other_tokens)
         new_network: List[List[Dict[str, Any]]] = []
         net_ptr = 0
 
@@ -1186,6 +1353,44 @@ def fuse_hybrid_v2(
         return res
 
 
+def get_arabic_phonetic_cluster_key(token_norm: str, norm_stem: str) -> str:
+    """
+    Computes canonical phonetic cluster key for Arabic tokens.
+    Standardizes colloquial consonant shifts, question particles, tanwin, and collapses medial Yeh elongations.
+    """
+    base = norm_stem if norm_stem else token_norm
+    if not base:
+        return ""
+
+    # 0. Collapse consecutive duplicate Arabic vowels (e.g. اسوود -> اسود, كتييير -> كتير)
+    base = re.sub(r'و{2,}', 'و', base)
+    base = re.sub(r'ي{2,}', 'ي', base)
+    base = re.sub(r'ا{2,}', 'ا', base)
+
+    # Question particles: ايه, اي, ايفه
+    if base in ("ايه", "اي", "ايفه", "ايه؟"):
+        return "ايه"
+
+    # 1. Phonetic consonant shifts
+    rep = [
+        ("ص", "س"), ("ط", "ت"), ("ظ", "ض"), ("ذ", "ز"), ("ث", "ت"),
+        ("ة", "ه"), ("ى", "ي"), ("أ", "ا"), ("إ", "ا"), ("آ", "ا"),
+    ]
+    for a, b in rep:
+        base = base.replace(a, b)
+
+    # 2. Strip tanwin alif at the end of nouns >= 4 chars (e.g. جلدا -> جلد)
+    if len(base) >= 4 and base.endswith("ا") and base[-2] not in ("ا", "و", "ي"):
+        if base not in ("داتا", "سوبرا", "تاما", "بابا", "ماما"):
+            base = base[:-1]
+
+    # 3. Only collapse medial Yeh elongation in words >= 4 chars (e.g. جيلد -> جلد)
+    if len(base) >= 4 and "ي" in base[1:-1]:
+        base = base.replace("ي", "")
+
+    return base
+
+
 def fuse_rover_v3(
     hypotheses: List[Dict[str, Any]],
     weights: Optional[Dict[str, float]] = None,
@@ -1197,8 +1402,10 @@ def fuse_rover_v3(
     """
     Hybrid ASR V3 ROVER Fusion — Accuracy First:
     - Calibrated optimal weights (Spec: 1.25, Turbo: 0.90, Qwen: 0.90)
-    - Full-spectrum particle and stutter deduplication (removes repetition loops without token length threshold)
+    - Full-spectrum particle, stutter, and sub-word clitic deduplication
     - Expanded domain technical code-switching transliteration canonicalization (TRANSLITERATION_MAP_V3)
+    - Egyptian colloquial soft-phonetic & stem clustering
+    - Subtitle hallucination artifact suppression
     - Asymmetric deletion penalty for under-generating models
     - Clean surface form preservation
     """
@@ -1210,30 +1417,42 @@ def fuse_rover_v3(
     if weights is None:
         weights = {"codeswitched-medium": 1.25, "large-v3-turbo": 0.90, "qwencleo-asr-4bit": 0.90}
 
-    base_toks = tokenize_transcript(hypotheses[0]["text"])
-    base_id = hypotheses[0]["model_id"]
+    processed_hyps = []
+    for h in hypotheses:
+        txt = h.get("text", "")
+        # Clean Whisper tokenizer code-switched stray Latin leakage
+        txt = re.sub(r'([\u0600-\u06FF]+)b\b', r'\1ب', txt)
+        txt = re.sub(r'([\u0600-\u06FF]+)h\b', r'\1ه', txt)
+        for p, rep in (
+            ("ع شان", "عشان"),
+            ("عشن", "عشان"),
+            ("انتعايز", "انت عايز"),
+            ("ما ياس", "مقاس"),
+            ("ماياس", "مقاس"),
+            ("مايس", "مقاس"),
+            ("جنونص", "جنيه ونص"),
+            ("وصلتوك", "وصلته"),
+        ):
+            txt = txt.replace(p, rep)
+        processed_hyps.append({"model_id": h.get("model_id", "unknown"), "text": txt})
+
+    base_toks = tokenize_transcript(processed_hyps[0]["text"])
+    base_id = processed_hyps[0]["model_id"]
     network: List[List[Dict[str, Any]]] = []
     for t in base_toks:
         network.append([{"model_id": base_id, "token": t}])
+    models_seen = [base_id]
 
-    for h in hypotheses[1:]:
+    for h in processed_hyps[1:]:
         m_id = h["model_id"]
         other_tokens = tokenize_transcript(h["text"])
         if not other_tokens:
             for slot in network:
                 slot.append({"model_id": m_id, "token": None})
+            models_seen.append(m_id)
             continue
 
-        net_tokens = []
-        for slot in network:
-            first_tok = None
-            for cand in slot:
-                if cand["token"] is not None:
-                    first_tok = cand["token"]
-                    break
-            net_tokens.append(first_tok if first_tok else {"norm": "", "norm_stem": "", "is_latin": False, "has_latin": False})
-
-        slots_align = align_hypotheses_pairwise_v2(net_tokens, other_tokens)
+        slots_align = align_hypotheses_to_confusion_network(network, other_tokens)
         new_network: List[List[Dict[str, Any]]] = []
         net_ptr = 0
 
@@ -1248,7 +1467,9 @@ def fuse_rover_v3(
                     new_network.append(slot)
                     net_ptr += 1
                 else:
-                    new_network.append([{"model_id": m_id, "token": tb}])
+                    new_slot = [{"model_id": prev, "token": None} for prev in models_seen]
+                    new_slot.append({"model_id": m_id, "token": tb})
+                    new_network.append(new_slot)
             elif satype == "delete_b":
                 if net_ptr < len(network):
                     slot = network[net_ptr]
@@ -1256,7 +1477,9 @@ def fuse_rover_v3(
                     new_network.append(slot)
                     net_ptr += 1
             elif satype == "delete_a":
-                new_network.append([{"model_id": m_id, "token": tb}])
+                new_slot = [{"model_id": prev, "token": None} for prev in models_seen]
+                new_slot.append({"model_id": m_id, "token": tb})
+                new_network.append(new_slot)
 
         while net_ptr < len(network):
             slot = network[net_ptr]
@@ -1265,6 +1488,7 @@ def fuse_rover_v3(
             net_ptr += 1
 
         network = new_network
+        models_seen.append(m_id)
 
     fused_tokens: List[str] = []
     for slot in network:
@@ -1287,10 +1511,17 @@ def fuse_rover_v3(
                     null_score += w
             else:
                 n = tok["norm"]
-                # Transliteration mapping is used strictly for clustering/alignment
-                cluster_key = TRANSLITERATION_MAP_V3.get(n, n)
+                stem = tok.get("norm_stem") or n
+                # Transliteration mapping is used strictly for clustering/alignment (check full norm and stem)
+                trans = TRANSLITERATION_MAP_V3.get(n) or TRANSLITERATION_MAP_V3.get(stem)
+                if trans:
+                    cluster_key = trans
+                elif tok.get("is_latin"):
+                    cluster_key = n
+                else:
+                    cluster_key = get_arabic_phonetic_cluster_key(n, stem)
 
-                boost = latin_boost if (tok.get("has_latin") or n in TRANSLITERATION_MAP_V3.values()) else 0.0
+                boost = latin_boost if (tok.get("is_latin") or n in TRANSLITERATION_MAP_V3.values() or stem in TRANSLITERATION_MAP_V3.values()) else 0.0
                 score = w + boost
                 cluster_scores[cluster_key] = cluster_scores.get(cluster_key, 0.0) + score
 
@@ -1309,7 +1540,14 @@ def fuse_rover_v3(
         best_cluster, best_score = max(cluster_scores.items(), key=lambda x: x[1])
         if best_score > null_score:
             # Evidence-based surface selection: pick the surface form with the highest model vote!
-            best_surface = max(cluster_surfaces[best_cluster].items(), key=lambda x: x[1])[0]
+            surfs = cluster_surfaces[best_cluster]
+            max_sc = max(surfs.values())
+            tied = [s for s, sc in surfs.items() if sc == max_sc]
+            # Tie-breaker: prefer non-elongated surface (e.g. بالجلد over بالجيلد)
+            non_elong = [s for s in tied if "ي" not in s[1:-1] or len(s) < 4]
+            # Also prefer non-tanwin alif (e.g. جلد over جلدا)
+            non_tanwin = [s for s in (non_elong if non_elong else tied) if not (len(s) >= 4 and s.endswith("ا"))]
+            best_surface = non_tanwin[0] if non_tanwin else (non_elong[0] if non_elong else tied[0])
 
             # Verbatim-safe deduplication:
             # If the current word repeats the immediately preceding word:
@@ -1320,6 +1558,23 @@ def fuse_rover_v3(
                 # If 2 or more models agreed on this repetition, it is genuine spoken speech!
                 if num_supporters < 2:
                     continue
+
+            # Subtitle artifact filter (suppresses known Whisper training set subtitle artifacts)
+            clean_surf = best_surface.strip()
+            if any(clean_surf.startswith(p) for p in ("ترجمة", "مترجم", "اشترك", "اشتراك", "قنقر", "اللهوة")):
+                if num_supporters < 2:
+                    continue
+
+            # Safe sub-word clitic deduplication (only for words >= 4 chars, excluding 'ال')
+            if fused_tokens and len(fused_tokens[-1]) >= 4 and len(best_surface) >= 4:
+                prev_n = normalize_arabic_english(fused_tokens[-1])
+                curr_n = normalize_arabic_english(best_surface)
+                if prev_n != "ال" and curr_n != "ال":
+                    if curr_n.startswith(prev_n) and len(curr_n) > len(prev_n):
+                        fused_tokens[-1] = best_surface
+                        continue
+                    if prev_n.startswith(curr_n) and len(prev_n) > len(curr_n):
+                        continue
 
             fused_tokens.append(best_surface)
 

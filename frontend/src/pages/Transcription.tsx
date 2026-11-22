@@ -27,6 +27,7 @@ import {
   Info,
   Cpu,
   Zap,
+  Layers,
   Repeat,
   Undo2,
   Redo2,
@@ -188,6 +189,35 @@ export const Transcription: React.FC<TranscriptionProps> = ({
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  const handleDownloadModel = async (modelId: string) => {
+    try {
+      if (modelId === 'hybrid-v3') {
+        const cs = models.find(m => m.id === 'codeswitched-medium');
+        const tb = models.find(m => m.id === 'large-v3-turbo');
+        if (cs && !cs.is_downloaded) await api.downloadModel('codeswitched-medium');
+        if (tb && !tb.is_downloaded) await api.downloadModel('large-v3-turbo');
+      } else {
+        await api.downloadModel(modelId);
+      }
+      showToast('Model download initialized...');
+      const poll = setInterval(async () => {
+        try {
+          const res = await api.getModels();
+          setModels(res.models);
+          const target = res.models.find(x => x.id === modelId);
+          if (target && target.is_downloaded) {
+            clearInterval(poll);
+            showToast(`Model ${target.name} is ready!`);
+          }
+        } catch (e) {
+          clearInterval(poll);
+        }
+      }, 2000);
+    } catch (err: any) {
+      showToast(err.message || 'Download failed');
+    }
   };
 
   const loadCompletedJob = async (jobId: string) => {
@@ -992,80 +1022,188 @@ export const Transcription: React.FC<TranscriptionProps> = ({
 
           {/* Model & Processing Options */}
           <div className="lg:col-span-2 rounded-2xl border border-surface-800 bg-surface-900/50 p-6 light:border-surface-200 light:bg-white space-y-5">
-            <h3 className="text-sm font-bold text-white light:text-surface-900 flex items-center gap-2">
-              <Sliders className="h-4 w-4 text-brand-400" />
-              <span>ASR Engine & Acoustic Preset</span>
-            </h3>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Model Selection */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-surface-300">Whisper Model:</label>
-                <select
-                  value={selectedModel}
-                  onChange={e => setSelectedModel(e.target.value)}
-                  className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none"
-                >
-                  {models.filter(m => !m.benchmark_only).map(m => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} ({m.is_downloaded ? 'Downloaded' : 'Download Needed'})
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-surface-400">
-                  Recommended: <strong>Egyptian Arabic & English (Specialized)</strong> for local colloquial voice notes.
-                </p>
+            {/* Mode Presets Selection */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white light:text-surface-900 flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-brand-400" />
+                  <span>{t.presetSelectionLabel}</span>
+                </h3>
+                {selectedModel !== 'codeswitched-medium' && selectedModel !== 'hybrid-v3' && (
+                  <span className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-surface-800 text-surface-300 border border-surface-700">
+                    {t.presetCustomTitle}: {models.find(m => m.id === selectedModel)?.name || selectedModel}
+                  </span>
+                )}
               </div>
 
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                {/* Fast Transcription Card */}
+                <div
+                  onClick={() => setSelectedModel('codeswitched-medium')}
+                  className={`relative cursor-pointer rounded-2xl border p-4 transition-all duration-200 select-none ${
+                    selectedModel === 'codeswitched-medium'
+                      ? 'border-brand-500 bg-brand-500/10 shadow-lg ring-1 ring-brand-500/50'
+                      : 'border-surface-800 bg-surface-950/60 hover:border-surface-700 hover:bg-surface-900/40'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className={`p-2 rounded-xl ${selectedModel === 'codeswitched-medium' ? 'bg-brand-500/20 text-brand-400' : 'bg-surface-800 text-surface-400'}`}>
+                        <Zap className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-white light:text-surface-900">{t.presetFastTitle}</span>
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand-500/20 text-brand-300 border border-brand-500/30">
+                            {t.presetFastBadge}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-surface-400 font-mono mt-0.5">
+                          Engine: Specialized Whisper Medium
+                        </p>
+                      </div>
+                    </div>
+                    {selectedModel === 'codeswitched-medium' && (
+                      <CheckCircle2 className="h-4 w-4 text-brand-400 flex-shrink-0" />
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-surface-300 light:text-surface-600 mt-2.5 leading-relaxed">
+                    {t.presetFastDesc}
+                  </p>
+
+                  {/* Model readiness & quick download */}
+                  <div className="mt-3 pt-2.5 border-t border-surface-800/80 light:border-surface-200 flex items-center justify-between text-[11px]">
+                    {models.find(m => m.id === 'codeswitched-medium')?.is_downloaded ? (
+                      <span className="text-emerald-400 flex items-center gap-1 font-medium text-[11px]">
+                        <Check className="h-3 w-3" />
+                        <span>{t.modelStatusDownloaded}</span>
+                      </span>
+                    ) : (
+                      <div className="flex items-center justify-between w-full">
+                        <span className="text-amber-400 flex items-center gap-1 font-medium text-[10px]">
+                          <AlertTriangle className="h-3 w-3" />
+                          <span>{t.modelStatusDownloadNeeded} (~0.78 GB)</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleDownloadModel('codeswitched-medium'); }}
+                          disabled={models.find(m => m.id === 'codeswitched-medium')?.is_downloading}
+                          className="px-2 py-1 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-bold text-[10px] shadow"
+                        >
+                          {models.find(m => m.id === 'codeswitched-medium')?.is_downloading ? t.downloadingStatus : t.downloadNowBtn}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Maximum Accuracy — Experimental Card */}
+                <div
+                  onClick={() => setSelectedModel('hybrid-v3')}
+                  className={`relative cursor-pointer rounded-2xl border p-4 transition-all duration-200 select-none ${
+                    selectedModel === 'hybrid-v3'
+                      ? 'border-purple-500 bg-purple-500/10 shadow-lg ring-1 ring-purple-500/50'
+                      : 'border-surface-800 bg-surface-950/60 hover:border-surface-700 hover:bg-surface-900/40'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className={`p-2 rounded-xl ${selectedModel === 'hybrid-v3' ? 'bg-purple-500/20 text-purple-400' : 'bg-surface-800 text-surface-400'}`}>
+                        <Layers className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-white light:text-surface-900">{t.presetMaxAccuracyTitle}</span>
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                            {t.presetMaxAccuracyBadge}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-surface-400 font-mono mt-0.5">
+                          Engine: Hybrid ASR V3 (Specialized + Turbo + QwenCleo)
+                        </p>
+                      </div>
+                    </div>
+                    {selectedModel === 'hybrid-v3' && (
+                      <CheckCircle2 className="h-4 w-4 text-purple-400 flex-shrink-0" />
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-surface-300 light:text-surface-600 mt-2.5 leading-relaxed">
+                    {t.presetMaxAccuracyDesc}
+                  </p>
+
+                  {/* Model readiness & quick download */}
+                  <div className="mt-3 pt-2.5 border-t border-surface-800/80 light:border-surface-200 flex items-center justify-between text-[11px]">
+                    {models.find(m => m.id === 'hybrid-v3')?.is_downloaded ? (
+                      <span className="text-emerald-400 flex items-center gap-1 font-medium text-[11px]">
+                        <Check className="h-3 w-3" />
+                        <span>{t.modelStatusDownloaded}</span>
+                      </span>
+                    ) : (
+                      <div className="flex items-center justify-between w-full">
+                        <span className="text-amber-400 flex items-center gap-1 font-medium text-[10px]">
+                          <AlertTriangle className="h-3 w-3" />
+                          <span>{t.modelStatusDownloadNeeded} (Twin Models)</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleDownloadModel('hybrid-v3'); }}
+                          disabled={models.find(m => m.id === 'codeswitched-medium')?.is_downloading || models.find(m => m.id === 'large-v3-turbo')?.is_downloading}
+                          className="px-2 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-[10px] shadow"
+                        >
+                          {t.downloadNowBtn}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Honest Accuracy Disclaimer */}
+              <div className="rounded-xl border border-surface-800 bg-surface-950/70 p-3 text-[11px] text-surface-400 flex items-start gap-2.5 light:border-surface-200 light:bg-surface-50 light:text-surface-600">
+                <Info className="h-4 w-4 text-brand-400 flex-shrink-0 mt-0.5" />
+                <span className="leading-relaxed">{t.presetDisclaimer}</span>
+              </div>
+            </div>
+
+            {/* Core Language & Fidelity Controls */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
               {/* Language Selection */}
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-surface-300">Spoken Language:</label>
+                <label className="text-xs font-semibold text-surface-300 light:text-surface-700">{t.languageSelectionLabel}:</label>
                 <select
                   value={language}
                   onChange={e => setLanguage(e.target.value)}
-                  className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none"
+                  className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none light:border-surface-200 light:bg-white light:text-surface-900"
                 >
-                  <option value="ar">Arabic (العربية)</option>
-                  <option value="en">English</option>
-                  <option value="auto">Auto-Detect</option>
+                  <option value="ar">{t.languageArabic}</option>
+                  <option value="en">{t.languageEnglish}</option>
+                  <option value="auto">{t.languageAuto}</option>
                 </select>
               </div>
 
               {/* Verbatim Mode */}
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-surface-300">Transcription Mode:</label>
+                <label className="text-xs font-semibold text-surface-300 light:text-surface-700">{t.modeLabel}:</label>
                 <select
                   value={verbatimMode}
                   onChange={e => setVerbatimMode(e.target.value as any)}
-                  className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none"
+                  className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none light:border-surface-200 light:bg-white light:text-surface-900"
                 >
-                  <option value="strict">Strict Verbatim (Word-for-Word, No Filtering)</option>
-                  <option value="clean">Clean Verbatim (Filtered Fillers)</option>
-                </select>
-              </div>
-
-              {/* Accuracy Mode */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-surface-300">Accuracy & Beam Search:</label>
-                <select
-                  value={accuracyMode}
-                  onChange={e => setAccuracyMode(e.target.value as any)}
-                  className="w-full rounded-xl border border-surface-700 bg-surface-950 p-2.5 text-xs text-white focus:border-brand-500 focus:outline-none"
-                >
-                  <option value="maximum">Maximum Accuracy (Beam Size 5, High Context)</option>
-                  <option value="recovery">Accuracy Recovery (Boundary De-duplication & Technical Boosting)</option>
-                  <option value="balanced">Balanced (Fast, Beam Size 3)</option>
+                  <option value="strict">{t.modeStrictVerbatim} (Word-for-Word, No Filtering)</option>
+                  <option value="clean">{t.modeClean} (Clean Fillers & Polished)</option>
                 </select>
               </div>
             </div>
 
             {/* Egyptian Audio Preset Info Card */}
-            <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3.5 text-xs text-surface-300 space-y-1">
+            <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3.5 text-xs text-surface-300 space-y-1 light:text-surface-700">
               <div className="flex items-center gap-2 text-brand-300 font-bold">
                 <Zap className="h-4 w-4" />
                 <span>Egyptian Arabic Preset Applied</span>
               </div>
-              <p className="text-[11px] text-surface-400">
+              <p className="text-[11px] text-surface-400 light:text-surface-600">
                 Acoustic VAD filter is set to <strong>OFF</strong> by default for WhatsApp voice notes to preserve quiet Egyptian utterances and code-switched terms.
               </p>
             </div>
@@ -1082,25 +1220,76 @@ export const Transcription: React.FC<TranscriptionProps> = ({
               </button>
 
               {showAdvanced && (
-                <div className="mt-3 p-3.5 rounded-xl border border-surface-800 bg-surface-950 space-y-3 text-xs animate-fadeIn">
-                  <div className="flex items-center justify-between">
-                    <span>Voice Activity Detection (VAD):</span>
-                    <input
-                      type="checkbox"
-                      checked={vadFilter}
-                      onChange={e => setVadFilter(e.target.checked)}
-                      className="rounded accent-brand-500 h-4 w-4"
-                    />
+                <div className="mt-3 p-4 rounded-xl border border-surface-800 bg-surface-950 space-y-4 text-xs animate-fadeIn light:border-surface-200 light:bg-surface-50">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Manual Model Override Dropdown */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-surface-300 light:text-surface-700">{t.modelSelectionLabel}:</label>
+                      <select
+                        value={selectedModel}
+                        onChange={e => setSelectedModel(e.target.value)}
+                        className="w-full rounded-xl border border-surface-700 bg-surface-900 p-2 text-xs text-white focus:border-brand-500 focus:outline-none light:border-surface-300 light:bg-white light:text-surface-900"
+                      >
+                        {models.filter(m => !m.benchmark_only).map(m => (
+                          <option key={m.id} value={m.id}>
+                            {m.name} ({m.is_downloaded ? 'Ready' : 'Download Needed'})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Accuracy Mode */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-surface-300 light:text-surface-700">Accuracy & Beam Search:</label>
+                      <select
+                        value={accuracyMode}
+                        onChange={e => setAccuracyMode(e.target.value as any)}
+                        className="w-full rounded-xl border border-surface-700 bg-surface-900 p-2 text-xs text-white focus:border-brand-500 focus:outline-none light:border-surface-300 light:bg-white light:text-surface-900"
+                      >
+                        <option value="maximum">Maximum Accuracy (Beam Size 5, High Context)</option>
+                        <option value="recovery">Accuracy Recovery (Boundary De-duplication & Technical Boosting)</option>
+                        <option value="balanced">Balanced (Fast, Beam Size 3)</option>
+                      </select>
+                    </div>
+
+                    {/* Processing Device */}
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-surface-300 light:text-surface-700">{t.deviceModeLabel}:</label>
+                      <select
+                        value={deviceMode}
+                        onChange={e => setDeviceMode(e.target.value)}
+                        className="w-full rounded-xl border border-surface-700 bg-surface-900 p-2 text-xs text-white focus:border-brand-500 focus:outline-none light:border-surface-300 light:bg-white light:text-surface-900"
+                      >
+                        <option value="auto">{t.deviceAuto}</option>
+                        <option value="cuda">{t.deviceCuda}</option>
+                        <option value="cpu">{t.deviceCpu}</option>
+                      </select>
+                    </div>
+
+                    {/* VAD Toggle */}
+                    <div className="flex items-center justify-between pt-4">
+                      <div>
+                        <span className="font-semibold text-surface-300 light:text-surface-700 block">{t.vadLabel}:</span>
+                        <span className="text-[10px] text-surface-500">{t.vadDesc}</span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={vadFilter}
+                        onChange={e => setVadFilter(e.target.checked)}
+                        className="rounded accent-brand-500 h-4 w-4"
+                      />
+                    </div>
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="block text-surface-400">Contextual Vocabulary Hints (comma-separated):</label>
+                  {/* Contextual Vocabulary Hints */}
+                  <div className="space-y-1 pt-1 border-t border-surface-800 light:border-surface-200">
+                    <label className="block text-surface-400 light:text-surface-600">Contextual Vocabulary Hints (comma-separated):</label>
                     <input
                       type="text"
                       placeholder="e.g. IEEE, CIS, Proposal, Collaboration"
                       value={vocabularyHints}
                       onChange={e => setVocabularyHints(e.target.value)}
-                      className="w-full rounded-lg border border-surface-800 bg-surface-900 p-2 text-xs text-white"
+                      className="w-full rounded-lg border border-surface-800 bg-surface-900 p-2 text-xs text-white light:border-surface-300 light:bg-white light:text-surface-900"
                     />
                   </div>
                 </div>

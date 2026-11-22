@@ -37,6 +37,8 @@ frontend/dist-ssr/
 .eslintcache
 
 # Verbatim Local Storage (Private User Audio & Model Weights)
+storage/*
+!storage/.gitkeep
 backend/storage/uploads/*
 !backend/storage/uploads/.gitkeep
 backend/storage/outputs/*
@@ -49,10 +51,6 @@ backend/storage/benchmarks/*
 !backend/storage/benchmarks/.gitkeep
 backend/storage/hybrid_cache/
 backend/storage/research_eval/
-!backend/storage/research_eval/.gitkeep
-!backend/storage/hybrid_cache/
-backend/storage/research_eval/
-!backend/storage/research_eval/.gitkeep.gitkeep
 backend/storage/temp/*
 !backend/storage/temp/.gitkeep
 benchmarks/*
@@ -63,6 +61,11 @@ backend/storage/*.db-wal
 backend/storage/*.db-shm
 backend/storage/*.backup*
 backend/scratch/
+scratch/
+backend/storage/blind_eval/
+backend/storage/longform_eval/
+backend/storage/independent_eval/
+backend/storage/audio/
 
 # Private User Media & Personal Test Files
 dd.ogg

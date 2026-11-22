@@ -85,6 +85,9 @@ def submit_transcription_job(
     vad_filter: bool = True,
     vocabulary_hints: Optional[str] = None,
 ) -> str:
+    if os.environ.get("VERBATIM_FORCE_CPU") == "1":
+        device_mode = "cpu"
+        compute_mode = "int8"
     job_id = uuid.uuid4().hex[:10]
     meta = extract_metadata(input_path)
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from app.transcription.hybrid_fusion import (
     fuse_rover_v3,
     fuse_hybrid_v3,
+    detect_critical_code_switch_conflict,
     TRANSLITERATION_MAP_V3,
     project_fused_words_to_segments,
 )
@@ -117,3 +118,46 @@ def test_certified_benchmark_accuracy_v3():
     assert tot_ref_words == 698
     # Hybrid V3 with verbatim safety achieves 311 errors (significantly lower than V2's 321 and Specialized's 347)
     assert tot_errors <= 311
+
+
+def test_egyptian_arabic_phonetic_clustering():
+    """Verify that colloquial phonetic/spelling variants cluster together, defeating acoustically corrupted single-model guesses."""
+    # Specialized Whisper misrecognizes 'بالجلب', whereas Turbo says 'بالجلد' and Qwen says 'بالجيلد'
+    hyps = [
+        {"model_id": "codeswitched-medium", "text": "كله بالجلب فوقه"},
+        {"model_id": "large-v3-turbo", "text": "كله بالجلد فوقه"},
+        {"model_id": "qwencleo-asr-4bit", "text": "كله بالجيلد فوقه"},
+    ]
+    res = fuse_rover_v3(hyps)
+    assert "بالجلد" in res["fused_text"], "Phonetic cluster must resolve to 'بالجلد'"
+    assert "بالجلب" not in res["fused_text"], "Acoustic defect 'بالجلب' must be overridden"
+
+
+def test_whisper_subtitle_artifact_suppression():
+    """Verify that unconfirmed Whisper training subtitle hallucinations are filtered out."""
+    hyps = [
+        {"model_id": "codeswitched-medium", "text": "فكر بس تبدأها خمس بقى اللهوة"},
+        {"model_id": "large-v3-turbo", "text": "فكر بس تبدأها خمس بقى"},
+        {"model_id": "qwencleo-asr-4bit", "text": "فكر بس تبدأها خمس بقى"},
+    ]
+    res = fuse_rover_v3(hyps)
+    assert "اللهوة" not in res["fused_text"], "Subtitle artifact 'اللهوة' must be suppressed"
+    assert res["fused_text"].endswith("خمس بقى")
+
+
+def test_arabic_high_disagreement_conflict_detection():
+    """Verify that pure Egyptian Arabic speech with high disagreement triggers conflict gate to invoke QwenCleo."""
+    spec_txt = (
+        "أنا كنت عامل عنده اللي هو ملعب السومو ده، و .. و كان عامله جلد، كان اللي بتاع بالجلد الملعبة خشب "
+        "كله بالجلب فوقه، كان كله في الفين و نص، مش عارف بقى انتي عايزة ايه بالظبط، و هو يعني هو مش بتاع جلدة، "
+        "و كان راحل واحد يعرفه بتاع الجلب و عمله عنده، هبقى مش فاهم انت عايذة ايفه بالضبط"
+    )
+    turbo_txt = (
+        "انا كنت عامل عنده اللي هو ملعب السومو ده. وكان عامله جلد كان البتاع بالجلد الملعبة خشب "
+        "كله بالجيلد فوقه كان كله بألفين ونصف مش عارف بقى انت عايزة ايه بالظبط وهو يعني هو مش بتاع جلدة "
+        "وكان راح لواحد دي يعرفه بتاع جلدا وعملوا عنده. انا بقا مش فهم انتعايز اي بالظابط."
+    )
+    is_conflict, reason = detect_critical_code_switch_conflict(spec_txt, turbo_txt)
+    assert is_conflict is True, "Pure Arabic disagreement must trigger conflict detection"
+    assert "high_arabic_disagreement" in reason or "high_mismatch_count" in reason
+

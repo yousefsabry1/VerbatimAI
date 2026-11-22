@@ -44,6 +44,19 @@ export interface Translations {
   languageArabic: string;
   languageEnglish: string;
   modeLabel: string;
+  presetSelectionLabel: string;
+  presetFastTitle: string;
+  presetFastDesc: string;
+  presetFastBadge: string;
+  presetMaxAccuracyTitle: string;
+  presetMaxAccuracyDesc: string;
+  presetMaxAccuracyBadge: string;
+  presetCustomTitle: string;
+  presetDisclaimer: string;
+  modelStatusDownloaded: string;
+  modelStatusDownloadNeeded: string;
+  downloadNowBtn: string;
+  downloadingStatus: string;
   modeStrictVerbatim: string;
   modeStrictVerbatimDesc: string;
   modeClean: string;
@@ -191,6 +204,19 @@ const translations: Record<Language, Translations> = {
     languageArabic: "Arabic (Egyptian & Dialects)",
     languageEnglish: "English",
     modeLabel: "Transcription Fidelity",
+    presetSelectionLabel: "Transcription Mode Presets",
+    presetFastTitle: "Fast Transcription",
+    presetFastDesc: "Optimized for speed using Egyptian Arabic & English Specialized Whisper. Accuracy may vary, particularly with challenging audio or noise.",
+    presetFastBadge: "Fast & Lightweight (~0.04x RTF)",
+    presetMaxAccuracyTitle: "Maximum Accuracy — Experimental",
+    presetMaxAccuracyDesc: "Prioritizes verbatim accuracy using Hybrid ASR V3 multi-model consensus (Specialized + Turbo + QwenCleo). May require more processing time. Experimental architecture.",
+    presetMaxAccuracyBadge: "Multi-Model Consensus (~30.4% Benchmark WER)",
+    presetCustomTitle: "Custom Model (Advanced)",
+    presetDisclaimer: "Notice: No speech recognition system is universally accurate or error-free. Fast mode optimizes turnaround speed, while Maximum Accuracy applies multi-model consensus to minimize errors. Please review and edit transcripts before publishing.",
+    modelStatusDownloaded: "Model Ready (Local)",
+    modelStatusDownloadNeeded: "Download Required",
+    downloadNowBtn: "Download Model",
+    downloadingStatus: "Downloading...",
     modeStrictVerbatim: "Strict Verbatim",
     modeStrictVerbatimDesc: "Preserves filler words, hesitations, informal Egyptian expressions, and mixed English terms.",
     modeClean: "Clean Transcript",
@@ -332,6 +358,19 @@ const translations: Record<Language, Translations> = {
     languageArabic: "العربية (المصرية واللهجات)",
     languageEnglish: "الإنجليزية",
     modeLabel: "طبيعة التفريغ النصي",
+    presetSelectionLabel: "أوضاع التفريغ الصوتي الموصى بها",
+    presetFastTitle: "تفريغ سريع (Fast Transcription)",
+    presetFastDesc: "محسّن لتحقيق أقصى سرعة باستخدام ويسبر المخصص للعامية والمصطلحات. قد تتفاوت الدقة في التسجيلات ذات الضوضاء العالية أو اللهجات المعقدة.",
+    presetFastBadge: "سريع وخفيف (~0.04x RTF)",
+    presetMaxAccuracyTitle: "أقصى دقة — تجريبي (Maximum Accuracy)",
+    presetMaxAccuracyDesc: "يعطي الأولوية القصوى للدقة الحرفية عبر دمج ثلاثة نماذج متزامنة (Hybrid V3: Specialized + Turbo + QwenCleo). قد يستغرق وقتاً أطول. معمارية تجريبية.",
+    presetMaxAccuracyBadge: "توافق النماذج المتعددة (30.4% معدل خطأ قياسي)",
+    presetCustomTitle: "نموذج مخصص (إعدادات متقدمة)",
+    presetDisclaimer: "تنبيه: لا يوجد نظام تفريغ صوتي آلي دقيق أو خالٍ من الأخطاء بشكل مطلق. يوفر الوضع السريع سرعة إنجاز فائقة، بينما يطبق وضع أقصى دقة تصويتاً ثلاثياً لتقليل الهلاوس. يُرجى دائماً مراجعة النص وتدقيقه.",
+    modelStatusDownloaded: "النموذج جاهز محلياً",
+    modelStatusDownloadNeeded: "يتطلب تنزيل النموذج",
+    downloadNowBtn: "تنزيل النموذج الآن",
+    downloadingStatus: "جاري التنزيل...",
     modeStrictVerbatim: "تفريغ حرفي دقيق (Strict Verbatim)",
     modeStrictVerbatimDesc: "يحافظ على كلمات الحشو، التردد، العبارات المصرية، والمصطلحات التقنية الإنجليزية.",
     modeClean: "نص منقح ومقروء (Clean Transcript)",

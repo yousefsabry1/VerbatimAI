@@ -13,12 +13,23 @@ if exist "backend\.venv\Scripts\activate.bat" (
     call backend\.venv\Scripts\activate.bat
     set "PY_EXEC=python"
 ) else (
+    echo [WARNING] Python virtual environment backend\.venv was not found.
+    echo If this is your first time, please run 00_INSTALL.bat first!
+    echo Attempting to proceed with system Python...
     where py >nul 2>nul
     if not errorlevel 1 (
         set "PY_EXEC=py -3.11"
     ) else (
         set "PY_EXEC=python"
     )
+)
+
+:: Check if port 8000 is already in use
+netstat -ano 2>nul | findstr ":8000 " | findstr "LISTENING" >nul 2>nul
+if not errorlevel 1 (
+    echo [WARNING] Port 8000 appears to be already in use by another process.
+    echo If Verbatim AI is already running, navigate to http://127.0.0.1:8000
+    echo.
 )
 
 :: Add NVIDIA pip library folders to PATH if present

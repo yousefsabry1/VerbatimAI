@@ -16,6 +16,7 @@ import shutil
 import hashlib
 import logging
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
@@ -127,7 +128,7 @@ def run_model_inference_cached(
             "--device", target_device,
         ]
         try:
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
             if proc.returncode != 0 or not temp_out.exists():
                 err = proc.stderr.strip() or proc.stdout.strip()
                 raise RuntimeError(f"QwenCleo execution failed: {err}")
@@ -135,7 +136,8 @@ def run_model_inference_cached(
             pred_text = qwen_res.get("text", "")
             peak_vram = qwen_res.get("peak_vram_mb", 0.0)
             elapsed = qwen_res.get("elapsed_seconds", round(time.time() - t0, 2))
-            segments = [{"start": 0.0, "end": 45.0, "text": pred_text}]
+            audio_dur = qwen_res.get("duration_seconds", 0.0)
+            segments = [{"start": 0.0, "end": audio_dur if audio_dur > 0 else 600.0, "text": pred_text}]
         finally:
             if temp_out.exists():
                 temp_out.unlink(missing_ok=True)
@@ -615,6 +617,11 @@ def run_hybrid_transcription(
         "verbatim_mode": verbatim_mode,
         "enhanced": enhance_audio,
         "vad": vad_filter,
+        "engine_version": "1.3.0-hybrid-v3",
+        "git_revision": "645b732",
+        "fusion_config": "rover_v3_multi_cand_null_guard_v3",
+        "audio_sha256": source_meta.get("sha256") or hashlib.sha256(input_path.read_bytes()).hexdigest(),
+        "processed_at": datetime.utcnow().isoformat(),
         "hybrid_metadata": {
             "fusion_method": fusion_res.get("method", "hybrid_fusion"),
             "code_switch_conflict_detected": is_conflict,

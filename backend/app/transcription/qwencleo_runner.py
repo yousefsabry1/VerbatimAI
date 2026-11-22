@@ -57,15 +57,21 @@ def main():
             torch.cuda.reset_peak_memory_stats()
 
         t0_infer = time.time()
-        # Upstream transcribe method
-        res = model.transcribe(
-            audio=str(audio_path),
+        # Safe long-form transcription engine with silence-aware chunking and dynamic budgeting
+        if str(backend_dir) not in sys.path:
+            sys.path.insert(0, str(backend_dir))
+        from app.transcription.qwencleo_longform import transcribe_qwencleo_longform
+
+        longform_res = transcribe_qwencleo_longform(
+            model=model,
+            audio_path=str(audio_path),
             language="Arabic",
+            device="cuda" if use_cuda else "cpu",
         )
         infer_time = time.time() - t0_infer
 
-        hyp_text = res[0].text.strip() if res and len(res) > 0 else ""
-        peak_vram_mb = torch.cuda.max_memory_allocated() / (1024**2) if use_cuda else 0.0
+        hyp_text = longform_res.get("text", "").strip()
+        peak_vram_mb = longform_res.get("peak_vram_mb", 0.0)
 
         result = {
             "status": "success",
@@ -75,6 +81,8 @@ def main():
             "peak_vram_mb": round(peak_vram_mb, 1),
             "device": "cuda" if use_cuda else "cpu",
             "compute": "4-bit NF4",
+            "mode": longform_res.get("mode", "silence_aware_chunking"),
+            "chunks_count": longform_res.get("chunks_count", 1),
         }
         output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -1,132 +1,198 @@
 # Verbatim AI — Every Word Matters.
 
 <div align="center">
-  <h3>Premium Local AI Transcription & Audio Conversion Application</h3>
-  <p><strong>100% Local • Zero Cloud APIs • Egyptian Arabic & English Optimized • Hardware Accelerated</strong></p>
+  <h3>Desktop Web Application for Speech Transcription & Audio Processing</h3>
+  <p><strong>100% Local • Zero Cloud APIs • Egyptian Arabic & English Code-Switching • Hardware Accelerated</strong></p>
 </div>
 
 ---
 
-## Overview
+## 1. Overview
 
-**Verbatim AI** is a professional, local-first desktop web application designed for high-accuracy speech transcription, synchronized audio editing, and high-fidelity audio format conversion.
+**Verbatim AI** is a local-first speech transcription, audio synchronization, and format conversion application. Built specifically for complex conversational audio—including WhatsApp voice notes, bilingual interviews, academic lectures, and technical meetings—Verbatim AI runs entirely on your local machine with zero external cloud dependencies.
 
-Powered by **Faster-Whisper (CTranslate2)** and **FFmpeg**, Verbatim AI keeps all your recordings, voice notes, and transcripts strictly on your local machine.
-
----
-
-## Key Features
-
-### 1. High-Accuracy AI Transcription
-- **WhatsApp Voice Note Precision**: Built and tested against real-world compressed audio (Opus / OGG).
-- **Egyptian Arabic & English Code-Switching**: Tuned with vocabulary prompts for real colloquial conversations, business meetings, and tech terminology (e.g. *meeting, deadline, sprint, project, call*).
-- **Strict Verbatim Mode**: Captures raw speech fidelity including filler words, hesitations, repetitions, and spoken slang without silent paraphrasing.
-- **Clean Transcript Mode**: Provides readable, well-punctuated paragraphs while preserving all original timestamped segments.
-- **Maximum Accuracy Pipeline**: Deep verification pass that assesses speech probability, average logprob, and flags suspicious or uncertain intervals for human review.
-- **Voice Activity Detection (VAD)**: Intelligent Silero VAD segmentation prevents word truncation and eliminates timestamp drift.
-
-### 2. Synchronized Transcript Review Workspace
-- **Click-to-Seek Audio**: Click any timestamp in the transcript to immediately jump audio playback to that exact second.
-- **Active Segment Highlighting**: Visual pulse highlight tracks the spoken words in real time as audio plays.
-- **Uncertainty Markers**: Low-confidence speech segments are automatically flagged with warning badges for human review.
-- **Inline Editing**: Correct typos, split, or refine segment text directly in the browser.
-- **Flexible Exports**: One-click download in **TXT (clean or timestamped)**, **SRT (subtitles)**, **WebVTT**, and **JSON (with word timestamps)**.
-
-### 3. Local Audio Converter
-- **Genuine FFmpeg Engine**: Real format conversion across **MP3, WAV, OGG, OPUS, M4A, AAC, FLAC, AIFF, and WEBM**.
-- **Quality Presets**:
-  - *Smaller File*: High compression, ideal for voice notes and messaging.
-  - *Balanced*: Recommended default for high audio fidelity with balanced file size.
-  - *High Quality*: Maximum bitrate / lossless audio preservation.
-  - *Custom*: Full manual control over bitrate (64k–320k), sample rate (16kHz–48kHz), and channels (Mono/Stereo).
-- **Before & After Audio Preview**: Side-by-side audio playback with exact storage savings calculation.
-- **Batch Processing**: Queue multiple files with controlled concurrency and download all converted outputs as a single ZIP archive.
-
-### 4. Local-First Privacy & Zero Telemetry
-- Runs 100% on `localhost:8000`.
-- No cloud accounts, no subscription keys, and no telemetry tracking.
-- Audio and transcript data are stored in a local SQLite database and never leave your hardware.
+All speech recognition, audio processing, and transcription data are stored in a private local SQLite database on `localhost:8000`. Your voice recordings never leave your computer.
 
 ---
 
-## Architecture
+## 2. Transcription Mode Presets
+
+Verbatim AI offers two distinct, purpose-built transcription presets designed to fit different hardware profiles and workflow requirements:
+
+| Feature / Metric | ⚡ **Fast Transcription** | 🎯 **Maximum Accuracy — Experimental** |
+|---|---|---|
+| **Default Selection** | **Yes** (Recommended for daily tasks) | Optional (High-fidelity research mode) |
+| **ASR Architecture** | Specialized Whisper Medium (`codeswitched-medium`) | **Hybrid ASR V3** Tri-Model Consensus |
+| **Models Combined** | 1 Single Model | 3 Models: Specialized Whisper + Turbo + QwenCleo |
+| **Speed (RTF)** | **~0.044x** (~22x faster than real-time) | **~0.283x** (~3.5x faster than real-time) |
+| **Code-Switching WER** | 122.65% (unprotected) / 42.19% (clean audio) | **20.51%** (Best-in-class multi-speaker benchmark) |
+| **Multi-Speaker WER** | 111.40% (susceptible to repetition loops) | **30.40%** (Suppresses hallucination loops) |
+| **VRAM Consumption** | ~0.94 GB VRAM (CUDA float16) | ~1.50 GB Peak VRAM (Sequential CUDA execution) |
+| **CPU Safe Mode** | Supported (int8 quantization) | Supported (CPU-only fusion) |
+| **Best Used For** | Fast voice notes, drafts, quick audio conversion | Complex bilingual meetings, technical terms, strict verbatim records |
+
+> [!IMPORTANT]
+> **Honest Accuracy Limitations**:  
+> No automated speech recognition system is 100% error-free.  
+> - **Fast Transcription** is optimized for high turnaround speed; however, its single decoder can be sensitive to heavy background noise, rapid overlapping speech, or catastrophic hallucination loops on low-bitrate audio.  
+> - **Maximum Accuracy — Experimental** uses multi-model voting and Arabic-English transliteration harmonization to eliminate loops and reduce error rates down to 20.51% on code-switching. It requires sequential model loading and more processing time.  
+> Always review and verify your transcripts before final publishing.
+
+### Advanced Settings & Individual Models
+All standalone ASR models remain accessible via the **Show Advanced Settings** drawer on the Transcription page:
+- `Egyptian Arabic & English (Specialized)` (Medium, ~0.78 GB)
+- `Whisper Large-v3-Turbo` (800M params, ~1.60 GB)
+- `Whisper Medium` (Standard multilingual, ~1.50 GB)
+- `Whisper Small` (Lightweight, ~0.48 GB)
+- `Whisper Large-v3` (High precision, ~3.10 GB)
+
+---
+
+## 3. System Requirements
+
+### Hardware Requirements
+- **Operating System**: Windows 10 or Windows 11 (64-bit).
+- **Processor (CPU)**: 4 physical cores minimum (Intel Core i5/i7 or AMD Ryzen 5/7 recommended).
+- **RAM**: 8 GB RAM minimum for Fast Mode; 16 GB RAM recommended for Maximum Accuracy Mode.
+- **Graphics Card (GPU)**:
+  - *Optional but strongly recommended*: NVIDIA GeForce GTX 1650, RTX 3050, or higher with at least 4 GB VRAM.
+  - *No GPU?* Verbatim AI features full **CPU Safe Mode** using int8 quantization that runs on any computer.
+- **Disk Space**: At least 5 GB free disk space for application files and downloaded models.
+
+### Software Prerequisites
+- **Python**: Python 3.10 or Python 3.11 ([Download from python.org](https://www.python.org/downloads/)).  
+  *Crucial: Check the box "Add Python to PATH" during installation.*
+- **FFmpeg**: Required for audio transcoding and metadata extraction ([Download from gyan.dev](https://www.gyan.dev/ffmpeg/builds/)).  
+  *If FFmpeg is not installed globally, Verbatim AI will automatically attempt to use bundled imageio-ffmpeg binaries.*
+- **Node.js**: *(Only required if compiling frontend from source)*: Node.js 18+ or 20+ LTS ([Download from nodejs.org](https://nodejs.org)). Pre-compiled production bundles are included.
+
+---
+
+## 4. Source Code vs Model Weights Availability
+
+> [!NOTE]
+> **Model Weights are NOT stored in the GitHub repository.**  
+> Neural network weights (ranging from 500 MB to 3.8 GB) are hosted on Hugging Face to keep the repository clone small, fast, and lightweight.
+
+Models are downloaded **on-demand** upon first selection or via the **Settings** / **Transcription** pages. Verified download sizes:
+- **Specialized Whisper Medium**: `Seif-Eldeen-Sameh/whisper-medium-arabic-codeswitched-ct2` (~0.78 GB)
+- **Whisper Large-v3-Turbo**: `deepdml/faster-whisper-large-v3-turbo-ct2` (~1.60 GB)
+- **Whisper Medium**: `Systran/faster-whisper-medium` (~1.43 GB)
+- **Whisper Small**: `Systran/faster-whisper-small` (~0.45 GB)
+- **QwenCleo-ASR (4-bit NF4)**: `mohammedaly22/QwenCleo-ASR` (~3.82 GB, optional)
+
+All downloaded weights are stored locally inside `backend/storage/models/`.
+
+---
+
+## 5. One-Click Windows Installation & Launch
+
+Verbatim AI includes pre-configured Windows batch utilities in the project root:
 
 ```text
 VerbatimAI/
-├── frontend/             # React 19 + TypeScript + Vite + Tailwind CSS
-│   ├── src/
-│   │   ├── components/   # Synchronized AudioPlayer, Navbar, UI controls
-│   │   ├── pages/        # Dashboard, Transcription, Converter, History, Settings
-│   │   ├── context/      # I18n (English/Arabic RTL), Theme (Dark/Light)
-│   │   └── services/     # Typed API client
-│   └── dist/             # Production build served directly by FastAPI
-│
-├── backend/              # Python 3.11+ FastAPI Application
-│   └── app/
-│       ├── api/          # Documented REST API (Health, Hardware, Models, Audio, Jobs)
-│       ├── core/         # SQLite database & storage configuration
-│       ├── audio/        # FFprobe inspection & filename validation
-│       ├── conversion/   # FFmpeg conversion engine with presets
-│       ├── transcription/# Faster-Whisper pipeline, VAD, CUDA fallback
-│       └── exports/      # SRT, VTT, TXT, and JSON formatters
-│
-├── tests/                # Automated pytest unit & integration test suite
-├── scripts/              # Windows batch installation and launch scripts
-└── storage/              # Local models, uploads, outputs (excluded from Git)
+├── 00_INSTALL.bat              <-- Step 1: Double-click to install environment
+├── 01_START_VERBATIM_AI.bat    <-- Step 2: Double-click to launch application (GPU/Auto)
+├── 02_CPU_SAFE_START.bat       <-- Alternative: Double-click for 100% CPU Safe Mode
+└── 03_CHECK_SYSTEM.bat         <-- Diagnostic tool to verify hardware & drivers
 ```
+
+### Installation Steps
+1. **Run Diagnostics (Optional)**:
+   Double-click `03_CHECK_SYSTEM.bat`. It inspects your OS, Python version, FFmpeg status, and NVIDIA GPU availability.
+2. **Install**:
+   Double-click `00_INSTALL.bat`.
+   - Checks Python and FFmpeg availability.
+   - Automatically initializes `.env` from `.env.example`.
+   - Creates an isolated virtual environment at `backend/.venv`.
+   - Installs all dependencies (FastAPI, Faster-Whisper, CTranslate2, PyTorch).
+   - Verifies the pre-built frontend distribution.
+3. **Launch**:
+   Double-click `01_START_VERBATIM_AI.bat`.
+   - Starts the FastAPI backend bound locally to `http://127.0.0.1:8000`.
+   - Automatically opens your default browser after 2 seconds.
+4. **Safe CPU Fallback**:
+   If you encounter GPU driver issues, lack an NVIDIA GPU, or experience CUDA out-of-memory errors, close the terminal and run `02_CPU_SAFE_START.bat`. It forces int8 CPU inference with zero GPU allocation.
 
 ---
 
-## One-Click Windows Installation & Startup
+## 6. Complete User Journey
 
-Non-technical Windows users can install and launch Verbatim AI with zero command-line configuration:
-
-1. **Install**: Double-click `00_INSTALL.bat`
-   - Automatically checks Python and FFmpeg.
-   - Configures the virtual environment and installs dependencies.
-   - Builds the production web interface.
-2. **Launch**: Double-click `01_START_VERBATIM_AI.bat`
-   - Starts the local backend server.
-   - Automatically opens your default web browser to `http://127.0.0.1:8000`.
-3. **Safe CPU Mode**: If running on a PC without an NVIDIA GPU, double-click `02_CPU_SAFE_START.bat`.
-4. **Diagnostics**: Double-click `03_CHECK_SYSTEM.bat` to verify your GPU, CUDA drivers, and FFmpeg installation.
-
----
-
-## Developer Setup (Manual)
-
-### Backend
-
-```powershell
-cd backend
-py -3.11 -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-### Frontend (Development Server)
-
-```powershell
-cd frontend
-npm install
-npm run dev
-```
-
-### Run Automated Tests
-
-```powershell
-py -3.11 -m pytest tests/
-```
+1. **Upload Audio**: Drag and drop any voice note or audio file into the workspace.
+2. **Select Mode**:
+   - Choose **Fast Transcription** for quick results.
+   - Choose **Maximum Accuracy — Experimental** for complex or code-switched recordings.
+3. **Download Model (First-Time Only)**: If the selected model is not on your disk, click **Download Model** directly inside the card.
+4. **Start Transcription**: Click **Start Transcription**. Progress is streamed live with stage updates.
+5. **Interactive Review**:
+   - **Click-to-Seek**: Click any timestamp in the transcript to jump playback to that exact point in time.
+   - **Visual Highlighting**: Words illuminate in sync with playback.
+   - **Review Queue**: Segments with low confidence or potential repetitions are surfaced in a dedicated review queue.
+   - **Inline Editing**: Fix any misrecognized words directly. Edits auto-save to the local SQLite database.
+6. **Export Options**: Export your verified transcript with one click in:
+   - **TXT**: Clean paragraphs or verbatim with timestamps.
+   - **SRT**: Standard subtitle format with millisecond intervals.
+   - **WebVTT**: Web-ready video caption format.
+   - **JSON**: Comprehensive machine-readable export with word-level alignments.
+7. **Audio Converter**: Convert any audio file between MP3, WAV, OGG, OPUS, M4A, AAC, and FLAC with real-time before/after playback comparison.
+8. **History**: Re-open and review any past transcription job at any time.
 
 ---
 
-## Upstream Attribution & License
+## 7. Supported Audio Formats
+
+Verbatim AI natively supports decoding and conversion across all common formats:
+
+| Format / Codec | Extension | Optimal Purpose |
+|---|---|---|
+| **OGG / Opus** | `.ogg`, `.opus` | WhatsApp voice notes, Telegram voice messages |
+| **MP3** | `.mp3` | Podcasts, voice recordings, general audio |
+| **WAV** | `.wav` | Uncompressed studio audio, professional interviews |
+| **M4A / AAC** | `.m4a`, `.aac` | Apple voice memos, mobile audio recordings |
+| **FLAC / AIFF** | `.flac`, `.aiff` | Lossless archival audio |
+| **WEBM** | `.webm` | Browser and web-recorded audio |
+| **Video Containers** | `.mp4`, `.mov`, `.mkv` | Automatic audio track extraction from video |
+
+---
+
+## 8. Privacy & Local Operation Details
+
+- **Zero External Calls**: Audio is processed entirely inside your local machine. No speech fragments, metadata, or logs are uploaded to any third-party server.
+- **Localhost Binding**: The backend binds exclusively to `127.0.0.1:8000`. It does not listen on external network interfaces.
+- **Local SQLite Database**: All transcripts, review notes, and job records are kept in `backend/storage/verbatim.db`.
+- **Private Audio Storage**: Stored uploads (`backend/storage/uploads/`) and outputs are excluded from Git version control by default.
+
+---
+
+## 9. Troubleshooting & FAQ
+
+### Python is not detected when running batch scripts
+- Ensure Python 3.10 or 3.11 is installed.
+- Re-run the Python installer, select **Modify**, and make sure **Add Python to environment variables (PATH)** is checked.
+
+### Port 8000 is already in use
+- Another application (or a previous Verbatim AI window) is occupying port 8000.
+- Close the existing terminal, or kill the process using:
+  ```powershell
+  Get-Process -Id (Get-NetTCPConnection -LocalPort 8000).OwningProcess | Stop-Process
+  ```
+
+### CUDA out-of-memory or driver error on startup
+- If your GPU has less than 4 GB VRAM or outdated drivers, CUDA initialization may fail.
+- Double-click `02_CPU_SAFE_START.bat` to run the application in 100% CPU mode.
+
+### FFmpeg not detected warning
+- Download a static build of FFmpeg from [gyan.dev/ffmpeg/builds/](https://www.gyan.dev/ffmpeg/builds/), extract it, and add the `bin/` directory to your Windows System PATH.
+- Verbatim AI will continue functioning using fallback libraries, but native FFmpeg provides the fastest conversion performance.
+
+---
+
+## 10. License & Attributions
 
 Verbatim AI is open-source under the **MIT License**.
 
-- Portions of the model loading and CUDA detection patterns were adapted from [Local Meeting Transcriber](https://github.com/AmrAboelhassan/local-meeting-transcriber) by Amr Aboelhassan.
-- Faster-Whisper is copyright (c) 2023 SYSTRAN.
-- CTranslate2 is copyright (c) 2020 OpenNMT.
-- For full third-party notices, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Faster-Whisper: Copyright (c) 2023 SYSTRAN.
+- CTranslate2: Copyright (c) 2020 OpenNMT.
+- Specialized Arabic Whisper Model: Fine-tuned by Seif-Eldeen Sameh (`Seif-Eldeen-Sameh/whisper-medium-arabic-codeswitched-ct2`).
+- QwenCleo-ASR: Developed by Mohammed Aly (`mohammedaly22/QwenCleo-ASR`).
+- See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for complete license text.

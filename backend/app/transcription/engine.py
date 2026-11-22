@@ -247,6 +247,10 @@ def load_whisper_model(
 
     model_path = str(get_model_dir(model_id))
 
+    # Force CPU Safe Mode if environment variable is set
+    if os.environ.get("VERBATIM_FORCE_CPU") == "1":
+        device_mode = "cpu"
+
     if device_mode == "cpu":
         device_attempts = ["cpu"]
     elif device_mode in ("cuda", "cuda_only"):
@@ -514,6 +518,9 @@ def run_transcription_pipeline(
     """
     Complete high-accuracy transcription pipeline.
     """
+    if os.environ.get("VERBATIM_FORCE_CPU") == "1":
+        device_mode = "cpu"
+        compute_mode = "int8"
     job_dir = OUTPUTS_DIR / f"job_{job_id}"
     job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -550,6 +557,96 @@ def run_transcription_pipeline(
             vocabulary_hints=vocabulary_hints,
             progress_callback=progress_callback,
         )
+
+    # Route Standalone QwenCleo 4-bit Long-Form ASR
+    if model_id == "qwencleo-asr-4bit":
+        from app.transcription.hybrid_orchestrator import run_model_isolated
+        if progress_callback:
+            progress_callback(0.15, "Transcribing with QwenCleo 4-bit Long-Form ASR (NF4)...")
+        total_duration = max(float(source_meta.get("duration") or 45.0), 1.0)
+        q_res = run_model_isolated(
+            model_id="qwencleo-asr-4bit",
+            audio_path=inference_audio,
+            duration_seconds=total_duration,
+            device_mode=device_mode,
+        )
+        pred_text = q_res.get("text", "").strip()
+        segments_list = [{
+            "id": 1,
+            "start": 0.0,
+            "end": total_duration,
+            "text": pred_text,
+            "original_text": pred_text,
+            "confidence": "high",
+            "uncertain": False,
+            "uncertain_reason": None,
+            "avg_logprob": 0.0,
+            "no_speech_prob": 0.0,
+            "compression_ratio": 1.0,
+            "repetition_resolved": False,
+            "words": [],
+        }]
+
+        timestamped_txt = generate_timestamped_txt(segments_list)
+        clean_txt = generate_clean_txt(segments_list)
+        srt_content = generate_srt(segments_list)
+        vtt_content = generate_vtt(segments_list)
+
+        metadata = {
+            "job_id": job_id,
+            "input_filename": input_path.name,
+            "duration": total_duration,
+            "duration_formatted": source_meta.get("duration_formatted", ""),
+            "detected_language": "ar",
+            "language_probability": 1.0,
+            "model_used": model_id,
+            "device_used": "cuda" if device_mode != "cpu" else "cpu",
+            "compute_used": "4-bit NF4",
+            "initial_device": "cuda" if device_mode != "cpu" else "cpu",
+            "cuda_fallback": False,
+            "accuracy_mode": accuracy_mode,
+            "verbatim_mode": verbatim_mode,
+            "enhanced": enhance_audio,
+            "vad": vad_filter,
+            "engine_version": "1.3.0",
+            "git_revision": "645b732",
+            "processed_at": datetime.utcnow().isoformat(),
+            "peak_vram_mb": q_res.get("peak_vram_mb", 0.0),
+        }
+
+        json_content = generate_json_export(job_id, segments_list, metadata)
+
+        txt_file = job_dir / "transcript.txt"
+        clean_file = job_dir / "clean_transcript.txt"
+        srt_file = job_dir / "subtitles.srt"
+        vtt_file = job_dir / "subtitles.vtt"
+        json_file = job_dir / "transcript.json"
+
+        txt_file.write_text(timestamped_txt, encoding="utf-8")
+        clean_file.write_text(clean_txt, encoding="utf-8")
+        srt_file.write_text(srt_content, encoding="utf-8")
+        vtt_file.write_text(vtt_content, encoding="utf-8")
+        json_file.write_text(json_content, encoding="utf-8")
+
+        if progress_callback:
+            progress_callback(1.0, "Transcription completed successfully")
+
+        return {
+            "job_id": job_id,
+            "original_text": pred_text,
+            "clean_text": clean_txt,
+            "segments": segments_list,
+            "srt_content": srt_content,
+            "vtt_content": vtt_content,
+            "output_files": {
+                "txt": str(txt_file),
+                "clean_txt": str(clean_file),
+                "srt": str(srt_file),
+                "vtt": str(vtt_file),
+                "json": str(json_file),
+            },
+            "metadata": metadata,
+        }
 
     # Stage C: Load AI Model
     model, actual_device, actual_compute = load_whisper_model(
@@ -967,6 +1064,9 @@ def run_transcription_pipeline(
         "verbatim_mode": verbatim_mode,
         "enhanced": enhance_audio,
         "vad": vad_filter,
+        "engine_version": "1.3.0",
+        "git_revision": "645b732",
+        "processed_at": datetime.utcnow().isoformat(),
     }
 
     json_content = generate_json_export(job_id, segments_list, metadata)

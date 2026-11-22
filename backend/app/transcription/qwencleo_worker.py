@@ -110,16 +110,22 @@ class QwenCleoWorker:
             torch.cuda.reset_peak_memory_stats()
 
         t0 = time.perf_counter()
-        res = self.model.transcribe(
-            audio=str(path_obj),
+        if str(self.backend_dir) not in sys.path:
+            sys.path.insert(0, str(self.backend_dir))
+        from app.transcription.qwencleo_longform import transcribe_qwencleo_longform
+
+        longform_res = transcribe_qwencleo_longform(
+            model=self.model,
+            audio_path=str(path_obj),
             context=context,
             language=language or "Arabic",
+            device=self.device,
         )
         elapsed = time.perf_counter() - t0
         self.last_active_time = time.time()
 
-        hyp_text = res[0].text.strip() if res and len(res) > 0 else ""
-        peak_vram_mb = torch.cuda.max_memory_allocated() / (1024**2) if self.device == "cuda" else 0.0
+        hyp_text = longform_res.get("text", "").strip()
+        peak_vram_mb = longform_res.get("peak_vram_mb", 0.0)
 
         return {
             "status": "success",
@@ -127,6 +133,8 @@ class QwenCleoWorker:
             "elapsed_seconds": round(elapsed, 2),
             "peak_vram_mb": round(peak_vram_mb, 1),
             "device": self.device,
+            "mode": longform_res.get("mode", "silence_aware_chunking"),
+            "chunks_count": longform_res.get("chunks_count", 1),
         }
 
     def transcribe_batch(self, audio_paths: list, language: str = "Arabic") -> dict:

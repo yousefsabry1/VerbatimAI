@@ -11,6 +11,20 @@ echo.
 echo Checking required dependencies...
 echo.
 
+:: 0. Initialize .env if missing
+if not exist ".env" (
+    if exist ".env.example" (
+        copy /y ".env.example" ".env" >nul
+        echo [OK] Initialized configuration file from .env.example.
+    )
+)
+
+:: Ensure storage directories exist
+if not exist "backend\storage\uploads" mkdir "backend\storage\uploads"
+if not exist "backend\storage\outputs" mkdir "backend\storage\outputs"
+if not exist "backend\storage\previews" mkdir "backend\storage\previews"
+if not exist "backend\storage\models" mkdir "backend\storage\models"
+
 :: 1. Check Python
 set "PY_CMD="
 py -3.11 -c "import sys" >nul 2>nul

@@ -8,6 +8,7 @@ backend_dir = Path(__file__).resolve().parent.parent.parent / "backend"
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
+from app.core.config import STORAGE_DIR
 from app.core.cuda_init import register_nvidia_dll_directories
 from app.transcription.engine import (
     is_cuda_error,
@@ -52,9 +53,10 @@ def test_simulated_cuda_generator_fallback(tmp_path):
     slices and transcribes the remaining audio from the checkpoint,
     and returns a combined transcript without losing committed segments.
     """
-    slice_path = Path(r"C:\Users\youse\.gemini\antigravity\brain\3e1f44d8-52f9-4a36-9ba0-e8ea39fa92d5\scratch\slices\slice1_00_45.wav")
-    if not slice_path.exists():
-        pytest.skip("Test audio slice1_00_45.wav not found in scratch directory")
+    audio_env = os.environ.get("VERBATIM_CUDA_TEST_AUDIO", "")
+    slice_path = Path(audio_env) if audio_env else None
+    if not slice_path or not slice_path.exists():
+        pytest.skip("Optional CUDA simulation test requires VERBATIM_CUDA_TEST_AUDIO pointing to multi-segment audio")
 
     # Set the test simulation hook
     os.environ["VERBATIM_SIMULATE_CUDA_ERROR"] = "1"
@@ -97,9 +99,10 @@ def test_cuda_only_diagnostic_mode_halts_without_fallback():
     Verifies that when device_mode='cuda_only', any CUDA failure halts immediately
     and raises an error without silently switching to CPU.
     """
-    slice_path = Path(r"C:\Users\youse\.gemini\antigravity\brain\3e1f44d8-52f9-4a36-9ba0-e8ea39fa92d5\scratch\slices\slice1_00_45.wav")
-    if not slice_path.exists():
-        pytest.skip("Test audio slice1_00_45.wav not found in scratch directory")
+    audio_env = os.environ.get("VERBATIM_CUDA_TEST_AUDIO", "")
+    slice_path = Path(audio_env) if audio_env else None
+    if not slice_path or not slice_path.exists():
+        pytest.skip("Optional CUDA simulation test requires VERBATIM_CUDA_TEST_AUDIO pointing to multi-segment audio")
 
     os.environ["VERBATIM_SIMULATE_CUDA_ERROR"] = "1"
     job_id = f"test_cuda_only_{os.getpid()}"

@@ -37,8 +37,19 @@ Verbatim AI incorporates, adapts, or interacts with the following open-source pr
 
 ---
 
+---
+
 ## 5. React, Vite & Tailwind CSS
 - **React**: MIT License (Meta Platforms, Inc.)
 - **Vite**: MIT License (Evan You & Vite Contributors)
 - **Tailwind CSS**: MIT License (Tailwind Labs, Inc.)
 - **Lucide Icons**: ISC License (Lucide Contributors)
+
+---
+
+## 6. Qwen2-Audio / QwenCleo (Experimental)
+- **Source**: https://github.com/QwenLM/Qwen2-Audio / Hugging Face
+- **Author**: Alibaba Cloud & Community Contributors
+- **License**: Apache License 2.0
+- **Notice**:
+  Experimental ASR candidate generation in Hybrid V3 leverages Qwen2-Audio architecture models via decoupled worker processes. Model weights are downloaded directly from Hugging Face by the user upon first use.

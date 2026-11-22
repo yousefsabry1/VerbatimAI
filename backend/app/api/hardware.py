@@ -43,8 +43,16 @@ def get_hardware_info():
         except Exception:
             pass
 
+    force_cpu = os.environ.get("VERBATIM_FORCE_CPU") == "1"
+
     # Recommendation logic
-    if cuda_available and vram_total_mb:
+    if force_cpu:
+        cuda_available = False
+        cuda_devices = 0
+        recommended_model = "small"
+        recommended_device = "cpu"
+        recommended_compute = "int8"
+    elif cuda_available and vram_total_mb:
         if vram_total_mb >= 7500:
             recommended_model = "large-v3"
             recommended_device = "cuda"
@@ -63,6 +71,7 @@ def get_hardware_info():
         recommended_compute = "int8"
 
     return {
+        "force_cpu": force_cpu,
         "cuda_available": cuda_available,
         "cuda_device_count": cuda_devices,
         "gpu_name": gpu_name or ("NVIDIA GPU" if cuda_available else "Not detected / CPU only"),
