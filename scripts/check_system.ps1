@@ -143,6 +143,13 @@ if ($nvidiaSmi) {
         $proc.WaitForExit(3000) | Out-Null
         if ($proc.ExitCode -eq 0) {
             $info = $proc.StandardOutput.ReadToEnd().Trim()
+            $hasNvidiaGpu = $true
+            $parts = $info.Split(',')
+            if ($parts.Count -ge 2) {
+                $gpuName = $parts[0].Trim()
+                $vramRaw = $parts[1].Trim()
+                $vramMb = [double]($vramRaw -replace '[^\d.]', '')
+            }
             Write-Host "   [OK] NVIDIA GPU detected: $info" -ForegroundColor Green
             Write-Host "        Hardware acceleration (CUDA float16/int8) is available." -ForegroundColor Green
         }
@@ -172,7 +179,41 @@ if (Test-Path $ModelsDir) {
 }
 Write-Host ""
 
-# 7. Summary
+# 7. Maximum Accuracy (Hybrid ASR V3) Operational Tier Status:
+Write-Host "7. Maximum Accuracy (Hybrid ASR V3) Operational Tier Status:" -ForegroundColor Yellow
+$csDownloaded = (Test-Path (Join-Path $ModelsDir "codeswitched-medium\model.bin")) -or (Test-Path (Join-Path $ModelsDir "codeswitched-medium\.ready"))
+$tbDownloaded = (Test-Path (Join-Path $ModelsDir "large-v3-turbo\model.bin")) -or (Test-Path (Join-Path $ModelsDir "large-v3-turbo\.ready"))
+$twinReady = $csDownloaded -and $tbDownloaded
+
+$expPy = Join-Path $ProjectRoot "experimental_venv\Scripts\python.exe"
+$expReady = Test-Path $expPy
+$qwenWeights = (Test-Path (Join-Path $ModelsDir "qwencleo-asr\model.safetensors")) -and (Test-Path (Join-Path $ModelsDir "qwencleo-asr\config.json"))
+$qwenGpuReady = $hasNvidiaGpu -and ($vramMb -ge 3500)
+$triModelReady = $twinReady -and $expReady -and $qwenWeights -and $qwenGpuReady
+
+if ($triModelReady) {
+    Write-Host "   [OK] Operational Tier: FULL TRI-MODEL CONSENSUS READY" -ForegroundColor Green
+    Write-Host "        - Twin Whisper Models: Ready" -ForegroundColor Green
+    Write-Host "        - QwenCleo 4-bit Arbiter: Ready on GPU ($gpuName)" -ForegroundColor Green
+    Write-Host "        - Hybrid V3 will adjudicate conflicts with full 3-model arbitration." -ForegroundColor Green
+} elseif ($twinReady) {
+    Write-Host "   [OK] Operational Tier: DUAL-MODEL CONSENSUS READY (Baseline)" -ForegroundColor Cyan
+    Write-Host "        - Twin Whisper Models: Ready (Codeswitched Medium + Whisper Large-v3-Turbo)" -ForegroundColor Green
+    if (-not $qwenGpuReady) {
+        Write-Host "        - QwenCleo Arbiter: GPU unsupported (Requires NVIDIA GPU with >= 4GB VRAM)" -ForegroundColor Yellow
+    } elseif (-not $expReady -or -not $qwenWeights) {
+        Write-Host "        - QwenCleo Arbiter: Not configured (Optional: run scripts\setup_qwencleo.bat to enable)" -ForegroundColor Yellow
+    }
+    Write-Host "        - Hybrid V3 will run with calibrated dual-model fusion and repetition suppression." -ForegroundColor White
+} else {
+    Write-Host "   [INFO] Operational Tier: REQUIRES MODEL DOWNLOAD" -ForegroundColor Yellow
+    Write-Host "          Codeswitched Medium: $(if ($csDownloaded) { 'Ready' } else { 'Needs Download' })" -ForegroundColor Gray
+    Write-Host "          Whisper Large Turbo: $(if ($tbDownloaded) { 'Ready' } else { 'Needs Download' })" -ForegroundColor Gray
+    Write-Host "          Download models on first use in the UI." -ForegroundColor Gray
+}
+Write-Host ""
+
+# 8. Summary
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host "  System Diagnostics Complete!" -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan

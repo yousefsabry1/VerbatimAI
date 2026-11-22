@@ -22,8 +22,8 @@ Verbatim AI offers two distinct, purpose-built transcription presets designed to
 | Feature / Metric | ⚡ **Fast Transcription** | 🎯 **Maximum Accuracy — Experimental** |
 |---|---|---|
 | **Default Selection** | **Yes** (Recommended for daily tasks) | Optional (High-fidelity research mode) |
-| **ASR Architecture** | Specialized Whisper Medium (`codeswitched-medium`) | **Hybrid ASR V3** Tri-Model Consensus |
-| **Models Combined** | 1 Single Model | 3 Models: Specialized Whisper + Turbo + QwenCleo |
+| **ASR Architecture** | Specialized Whisper Medium (`codeswitched-medium`) | **Hybrid ASR V3** (Dual-Model or Tri-Model Consensus) |
+| **Operational Tiers** | Single Model | **Tier 1 (Base)**: Twin Models (Specialized + Turbo)<br>**Tier 2 (Full)**: Twin Models + QwenCleo 4-bit Arbiter |
 | **Speed (RTF)** | **~0.044x** (~22x faster than real-time) | **~0.283x** (~3.5x faster than real-time) |
 | **Code-Switching WER** | 122.65% (unprotected) / 42.19% (clean audio) | **20.51%** (Best-in-class multi-speaker benchmark) |
 | **Multi-Speaker WER** | 111.40% (susceptible to repetition loops) | **30.40%** (Suppresses hallucination loops) |
@@ -32,10 +32,13 @@ Verbatim AI offers two distinct, purpose-built transcription presets designed to
 | **Best Used For** | Fast voice notes, drafts, quick audio conversion | Complex bilingual meetings, technical terms, strict verbatim records |
 
 > [!IMPORTANT]
-> **Honest Accuracy Limitations**:  
+> **Honest Accuracy Limitations & Operational Tiers**:  
 > No automated speech recognition system is 100% error-free.  
 > - **Fast Transcription** is optimized for high turnaround speed; however, its single decoder can be sensitive to heavy background noise, rapid overlapping speech, or catastrophic hallucination loops on low-bitrate audio.  
-> - **Maximum Accuracy — Experimental** uses multi-model voting and Arabic-English transliteration harmonization to eliminate loops and reduce error rates down to 20.51% on code-switching. It requires sequential model loading and more processing time.  
+> - **Maximum Accuracy — Experimental (Hybrid ASR V3)** operates in two transparent tiers:
+>   - **Tier 1 — Dual-Model Consensus (Default Out-of-the-Box)**: Combines Specialized Whisper Medium (~0.78 GB) and Whisper Large-v3-Turbo (~1.60 GB). Features calibrated ROVER scoring, particle deduplication, and technical transliteration normalization. Operates smoothly on GPU or CPU without heavy disk requirements.
+>   - **Tier 2 — Full Tri-Model Consensus (Optional Advanced Mode)**: Adds QwenCleo-ASR 4-bit NF4 (~3.82 GB model weights, ~6.5 GB total space including isolated environment). Requires an NVIDIA GPU with at least 4 GB VRAM. It is only called when a critical code-switching conflict is detected between the twin models to act as an intelligent arbiter. Run `04_SETUP_QWENCLEO_MAX_ACCURACY.bat` to configure it.
+> - The application truthfully reports its exact operational tier in the UI and transcript metadata: it never claims three-model execution when only two models ran.
 > Always review and verify your transcripts before final publishing.
 
 ### Advanced Settings & Individual Models
@@ -93,17 +96,22 @@ Verbatim AI includes pre-configured Windows batch launchers in the project root:
 
 ```text
 VerbatimAI/
-├── 00_INSTALL.bat              <-- Step 1: Double-click to install & configure everything automatically
-├── 01_START_VERBATIM_AI.bat    <-- Step 2: Double-click to launch application (GPU/Auto)
-├── 02_CPU_SAFE_START.bat       <-- Alternative: Double-click for 100% CPU Safe Mode on any laptop
-└── 03_CHECK_SYSTEM.bat         <-- Diagnostic tool to audit hardware, drivers & dependencies
+├── 00_INSTALL.bat                      <-- Step 1: Double-click to install & configure everything automatically
+├── 01_START_VERBATIM_AI.bat            <-- Step 2: Double-click to launch application (GPU/Auto)
+├── 02_CPU_SAFE_START.bat               <-- Alternative: Double-click for 100% CPU Safe Mode on any laptop
+├── 03_CHECK_SYSTEM.bat                 <-- Diagnostic tool to audit hardware, drivers, and tier readiness
+└── 04_SETUP_QWENCLEO_MAX_ACCURACY.bat   <-- Optional: Sets up QwenCleo 4-bit arbiter for Tri-Model Consensus
 ```
 
-### Installation Steps
+### Installation Steps & Realistic Timing
 1. **Download & Extract**:
    Download the latest VerbatimAI ZIP from GitHub and extract it to any folder on your machine (paths with spaces or non-C drives are fully supported).
 2. **Run Installer**:
    Double-click `00_INSTALL.bat`.
+   - **Realistic Time Expectation**:
+     - On typical broadband (15–50 Mbps): ~5 to 10 minutes.
+     - On high-speed fiber (100+ Mbps): ~3 to 5 minutes.
+     - If dependencies (Python 3.11, Node.js, FFmpeg) already exist: under 2 minutes.
    - The installer checks your Windows environment, RAM, and disk space.
    - Automatically bootstraps Python 3.11, FFmpeg, and Node.js if missing.
    - Creates the backend virtual environment at `backend/.venv` and installs dependencies.
@@ -118,6 +126,17 @@ VerbatimAI/
    - If Verbatim AI is already running, it brings up your existing session without crashing.
 4. **CPU-Safe Fallback**:
    On laptops or PCs without an NVIDIA GPU (or in case of CUDA driver issues), double-click `02_CPU_SAFE_START.bat`. It forces CPU int8 quantization and bypasses all CUDA GPU allocations.
+5. **Optional Full Tri-Model Consensus**:
+   For users with an NVIDIA GPU (>= 4 GB VRAM) who want the full 3-model code-switching arbiter:
+   - Double-click `04_SETUP_QWENCLEO_MAX_ACCURACY.bat`.
+   - Downloads QwenCleo-ASR 4-bit weights (~3.8 GB) and configures the isolated `experimental_venv` (~10–20 minutes depending on bandwidth).
+
+> [!TIP]
+> **Windows SmartScreen Note**:  
+> When running downloaded `.bat` or `.ps1` files on a fresh Windows PC, Windows SmartScreen may display: *"Windows protected your PC"*.  
+> This standard Windows notification occurs because open-source scripts do not carry paid commercial code-signing certificates.  
+> You can safely inspect all batch files and PowerShell scripts in any text editor—everything is transparent, open-source, and executes locally.  
+> To run: Click **More info** -> **Run anyway**. Never disable Windows SmartScreen or security features globally.
 
 ---
 

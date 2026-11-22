@@ -54,7 +54,9 @@ if not exist "%DIST_INDEX%" (
     )
 )
 
-:: 2. Prepend managed tools to PATH
+:: 2. Prepend managed tools to PATH and set PYTHONPATH
+set "PYTHONPATH=%PROJECT_ROOT%\backend;%PYTHONPATH%"
+
 if exist "%PROJECT_ROOT%\tools\ffmpeg\bin" (
     set "PATH=%PROJECT_ROOT%\tools\ffmpeg\bin;!PATH!"
 )
@@ -73,17 +75,21 @@ if exist "%VENV_DIR%\Lib\site-packages\nvidia\cuda_nvrtc\bin" (
     set "PATH=%VENV_DIR%\Lib\site-packages\nvidia\cuda_nvrtc\bin;!PATH!"
 )
 
-:: 3. Smoke check backend import
-"%PY_EXEC%" -c "import app.main" 2>nul
-if errorlevel 1 (
+:: 3. Smoke check backend import from backend directory
+pushd "%PROJECT_ROOT%\backend"
+"%PY_EXEC%" -c "import app.main" >nul 2>&1
+set "IMPORT_EXIT=!ERRORLEVEL!"
+if not "!IMPORT_EXIT!"=="0" (
     echo [ERROR] Backend application module failed import validation.
     echo Testing Python traceback:
     "%PY_EXEC%" -c "import app.main"
     echo.
     echo Please run 00_INSTALL.bat to repair dependencies.
+    popd
     pause
     exit /b 1
 )
+popd
 
 :: 4. Check port 8000
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue; if ($c) { try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/health' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; if ($r.StatusCode -eq 200 -and $r.Content -like '*Verbatim AI*') { Write-Host '[OK] Verbatim AI is already running and healthy at http://127.0.0.1:8000' -ForegroundColor Green; Write-Host 'Opening default browser...' -ForegroundColor Cyan; Start-Process 'http://127.0.0.1:8000'; exit 42; } } catch {} Write-Host ('[WARNING] Port 8000 is occupied by another process (PID: ' + $c[0].OwningProcess + ').') -ForegroundColor Yellow; }"

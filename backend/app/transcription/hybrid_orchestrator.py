@@ -206,6 +206,34 @@ def run_model_inference_cached(
     return result
 
 
+def run_model_isolated(
+    model_id: str,
+    audio_path: Path,
+    duration_seconds: float = 45.0,
+    device_mode: str = "auto",
+) -> Dict[str, Any]:
+    """
+    Executes a single model in complete isolation with VRAM hygiene and disk caching.
+    """
+    res = run_model_inference_cached(
+        audio_path=audio_path,
+        model_id=model_id,
+        device_mode=device_mode,
+    )
+    return {
+        "text": res.get("predicted_text", ""),
+        "segments": res.get("segments", []),
+        "elapsed_seconds": res.get("elapsed_seconds", 0.0),
+        "peak_vram_mb": res.get("peak_vram_mb", 0.0),
+    }
+
+
+def check_qwencleo_availability() -> Dict[str, Any]:
+    """Checks whether QwenCleo 4-bit arbiter environment, weights, and GPU are operational."""
+    from app.api.models import check_qwencleo_readiness
+    return check_qwencleo_readiness()
+
+
 def run_hybrid_asr_pipeline(
     audio_path: Path,
     duration_seconds: float = 45.0,
@@ -528,34 +556,71 @@ def run_hybrid_transcription(
     qwen_text = ""
     is_conflict = False
     conflict_reason = "none"
+    qwen_status = "not_invoked"
+
+    qwen_avail = check_qwencleo_availability()
 
     if model_id in ("hybrid-v2", "hybrid-v3"):
         # Hybrid V2/V3: Intelligent Selective Arbiter
         is_conflict, conflict_reason = detect_critical_code_switch_conflict(spec_text, turbo_text)
         if is_conflict:
-            if progress_callback:
-                progress_callback(0.70, "Hybrid Pass 3/3: Evaluating code-switching with QwenCleo-ASR (4-bit)...")
-            try:
-                qwen_res = run_qwencleo_benchmark(str(input_path), total_duration, "cuda")
-                qwen_text = qwen_res.get("text", "")
-            except Exception as e:
-                logger.warning("QwenCleo selective inference encountered warning: %s", e)
-                qwen_text = ""
+            if not qwen_avail["ready"]:
+                qwen_status = f"unconfigured_dual_model_resolution ({qwen_avail['status']}: {qwen_avail['reason']})"
+                logger.info(
+                    "Code-switch conflict detected (%s), but QwenCleo is unavailable (%s). "
+                    "Resolving via calibrated dual-model consensus.",
+                    conflict_reason, qwen_avail["status"]
+                )
+                if progress_callback:
+                    progress_callback(
+                        0.72,
+                        f"Conflict detected: Resolving via calibrated dual-model consensus (QwenCleo: {qwen_avail['status']})..."
+                    )
+            else:
+                if progress_callback:
+                    progress_callback(0.70, "Hybrid Pass 3/3: Evaluating code-switching with QwenCleo-ASR (4-bit)...")
+                try:
+                    qwen_res = run_qwencleo_benchmark(str(input_path), total_duration, "cuda")
+                    if qwen_res.get("status") == "error" or not qwen_res.get("text"):
+                        err_msg = qwen_res.get("error", "Empty text returned")
+                        logger.warning("QwenCleo selective inference returned error: %s. Falling back to dual-model resolution.", err_msg)
+                        qwen_status = f"execution_error_fallback ({err_msg})"
+                        qwen_text = ""
+                    else:
+                        qwen_text = qwen_res.get("text", "")
+                        qwen_status = "invoked_and_adjudicated"
+                except Exception as e:
+                    logger.warning("QwenCleo selective inference encountered exception: %s. Falling back to dual-model resolution.", e)
+                    qwen_status = f"execution_exception_fallback ({e})"
+                    qwen_text = ""
         else:
+            qwen_status = "skipped_high_agreement"
             if progress_callback:
                 progress_callback(0.75, "High Model Agreement Confirmed: Skipping secondary QwenCleo pass...")
     else:
         # Hybrid V1: Full Three-Model Execution
-        if progress_callback:
-            progress_callback(0.70, "Hybrid Pass 3/3: Evaluating code-switching with QwenCleo-ASR (4-bit)...")
-        try:
-            qwen_res = run_qwencleo_benchmark(str(input_path), total_duration, "cuda")
-            qwen_text = qwen_res.get("text", "")
-            is_conflict = True
-            conflict_reason = "hybrid_v1_full"
-        except Exception as e:
-            logger.warning("QwenCleo inference encountered warning: %s", e)
-            qwen_text = ""
+        is_conflict = True
+        conflict_reason = "hybrid_v1_full"
+        if not qwen_avail["ready"]:
+            qwen_status = f"unconfigured_dual_model_resolution ({qwen_avail['status']}: {qwen_avail['reason']})"
+            logger.info("Hybrid V1 requested, but QwenCleo unavailable (%s). Resolving via dual models.", qwen_avail["status"])
+        else:
+            if progress_callback:
+                progress_callback(0.70, "Hybrid Pass 3/3: Evaluating code-switching with QwenCleo-ASR (4-bit)...")
+            try:
+                qwen_res = run_qwencleo_benchmark(str(input_path), total_duration, "cuda")
+                if qwen_res.get("status") == "error" or not qwen_res.get("text"):
+                    err_msg = qwen_res.get("error", "Empty text returned")
+                    logger.warning("QwenCleo inference returned error: %s. Falling back to dual models.", err_msg)
+                    qwen_status = f"execution_error_fallback ({err_msg})"
+                    qwen_text = ""
+                else:
+                    qwen_text = qwen_res.get("text", "")
+                    qwen_status = "invoked_and_adjudicated"
+            except Exception as e:
+                logger.warning("QwenCleo inference encountered exception: %s. Falling back to dual models.", e)
+                qwen_status = f"execution_exception_fallback ({e})"
+                qwen_text = ""
 
     # Step 4: Multi-Model Fusion Synthesis
     if progress_callback:
@@ -613,6 +678,13 @@ def run_hybrid_transcription(
     srt_content = generate_srt(segments_list)
     vtt_content = generate_vtt(segments_list)
 
+    models_participated = ["codeswitched-medium", "large-v3-turbo"]
+    if qwen_text:
+        models_participated.append("qwencleo-asr-4bit")
+        effective_tier = "full_tri_model"
+    else:
+        effective_tier = "dual_model_consensus"
+
     metadata = {
         "job_id": job_id,
         "input_filename": input_path.name,
@@ -635,9 +707,12 @@ def run_hybrid_transcription(
         "audio_sha256": source_meta.get("sha256") or hashlib.sha256(input_path.read_bytes()).hexdigest(),
         "processed_at": datetime.utcnow().isoformat(),
         "hybrid_metadata": {
+            "hybrid_tier": effective_tier,
+            "models_participated": models_participated,
             "fusion_method": fusion_res.get("method", "hybrid_fusion"),
             "code_switch_conflict_detected": is_conflict,
             "conflict_reason": conflict_reason,
+            "qwen_status": qwen_status,
             "qwen_invoked": bool(qwen_text),
             "models_raw": {
                 "codeswitched-medium": spec_text,

@@ -975,9 +975,13 @@ def run_qwencleo_benchmark(active_audio: Path, duration: float, device_mode: str
     runner_py = project_root / "backend" / "app" / "transcription" / "qwencleo_runner.py"
 
     if not exp_py.exists():
-        raise RuntimeError(f"Isolated experimental python environment not found at {exp_py}")
+        err_msg = f"Isolated experimental python environment not found at {exp_py}"
+        logger.warning(err_msg)
+        return {"status": "error", "error": err_msg, "text": ""}
     if not runner_py.exists():
-        raise RuntimeError(f"QwenCleo runner script not found at {runner_py}")
+        err_msg = f"QwenCleo runner script not found at {runner_py}"
+        logger.warning(err_msg)
+        return {"status": "error", "error": err_msg, "text": ""}
 
     temp_out = BENCHMARK_DIR / f"qwencleo_run_{int(time.time() * 1000)}.json"
     target_device = "cuda" if device_mode != "cpu" else "cpu"

@@ -1120,7 +1120,9 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                           </span>
                         </div>
                         <p className="text-[10px] text-surface-400 font-mono mt-0.5">
-                          Engine: Hybrid ASR V3 (Specialized + Turbo + QwenCleo)
+                          {models.find(m => m.id === 'hybrid-v3')?.hybrid_readiness?.tier === 'full_tri_model'
+                            ? 'Engine: Hybrid ASR V3 (Full Tri-Model: Twin Models + QwenCleo Arbiter)'
+                            : 'Engine: Hybrid ASR V3 (Dual-Model: Codeswitched + Large Turbo)'}
                         </p>
                       </div>
                     </div>
@@ -1136,9 +1138,18 @@ export const Transcription: React.FC<TranscriptionProps> = ({
                   {/* Model readiness & quick download */}
                   <div className="mt-3 pt-2.5 border-t border-surface-800/80 light:border-surface-200 flex items-center justify-between text-[11px]">
                     {models.find(m => m.id === 'hybrid-v3')?.is_downloaded ? (
-                      <span className="text-emerald-400 flex items-center gap-1 font-medium text-[11px]">
-                        <Check className="h-3 w-3" />
-                        <span>{t.modelStatusDownloaded}</span>
+                      <span className="flex items-center gap-1.5 font-medium text-[11px]">
+                        {models.find(m => m.id === 'hybrid-v3')?.hybrid_readiness?.tier === 'full_tri_model' ? (
+                          <span className="text-emerald-400 flex items-center gap-1 font-semibold">
+                            <Check className="h-3 w-3" />
+                            <span>Full Tri-Model Consensus Ready</span>
+                          </span>
+                        ) : (
+                          <span className="text-indigo-400 flex items-center gap-1 font-semibold">
+                            <Check className="h-3 w-3" />
+                            <span>Dual-Model Consensus Ready (Twin Models)</span>
+                          </span>
+                        )}
                       </span>
                     ) : (
                       <div className="flex items-center justify-between w-full">

@@ -102,6 +102,36 @@ export interface ModelInfo {
   status_message: string;
   is_experimental?: boolean;
   benchmark_only?: boolean;
+  hybrid_readiness?: {
+    tier: 'needs_download' | 'dual_model_consensus' | 'full_tri_model';
+    tier_label: string;
+    twin_models_ready: boolean;
+    qwencleo_ready: boolean;
+    qwencleo_details?: {
+      ready: boolean;
+      environment_ready: boolean;
+      model_downloaded: boolean;
+      gpu_supported: boolean;
+      gpu_name?: string;
+      vram_mb?: number;
+      status: string;
+      reason: string;
+      disk_requirement_gb: number;
+      vram_requirement_mb: number;
+    };
+  };
+  qwencleo_readiness?: {
+    ready: boolean;
+    environment_ready: boolean;
+    model_downloaded: boolean;
+    gpu_supported: boolean;
+    gpu_name?: string;
+    vram_mb?: number;
+    status: string;
+    reason: string;
+    disk_requirement_gb: number;
+    vram_requirement_mb: number;
+  };
 }
 
 export interface ConversionPreset {

@@ -164,10 +164,25 @@ export const Settings: React.FC<SettingsProps> = ({ hardware }) => {
                       NOT DOWNLOADED
                     </span>
                   )}
+                  {m.hybrid_readiness && m.hybrid_readiness.tier === 'full_tri_model' && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                      TRI-MODEL CONSENSUS
+                    </span>
+                  )}
+                  {m.hybrid_readiness && m.hybrid_readiness.tier === 'dual_model_consensus' && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                      DUAL-MODEL CONSENSUS
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-surface-400 light:text-surface-600">
                   {m.recommended_for}
                 </p>
+                {m.qwencleo_readiness && !m.qwencleo_readiness.ready && (
+                  <p className="text-[10px] text-amber-400/90 font-medium">
+                    Status: {m.qwencleo_readiness.reason}
+                  </p>
+                )}
                 <p className="text-[11px] text-surface-500">
                   Download size: ~{m.approx_download_gb} GB • Disk size: {m.folder_size_gb > 0 ? `${m.folder_size_gb} GB` : '0 GB'}
                 </p>

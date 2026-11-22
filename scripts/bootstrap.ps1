@@ -827,6 +827,11 @@ Write-Host ""
 Write-Host "  Or for CPU-safe mode on any laptop:" -ForegroundColor Cyan
 Write-Host "    --> 02_CPU_SAFE_START.bat" -ForegroundColor Yellow
 Write-Host ""
+Write-Host "  Operational Tiers:" -ForegroundColor Cyan
+Write-Host "    - Base Engine: Ready (Fast Transcription & Hybrid Dual-Model Consensus)" -ForegroundColor White
+Write-Host "    - Optional Tri-Model Arbiter (QwenCleo 4-bit):" -ForegroundColor White
+Write-Host "      Run: scripts\setup_qwencleo.bat (Requires NVIDIA GPU >= 4GB VRAM, ~6.5 GB disk)" -ForegroundColor Gray
+Write-Host ""
 Write-Host "  Installation log saved to:" -ForegroundColor Gray
 Write-Host "    $LogFile" -ForegroundColor Gray
 Write-Host "========================================================" -ForegroundColor Green
