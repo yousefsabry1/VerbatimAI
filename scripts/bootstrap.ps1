@@ -24,7 +24,8 @@ param(
     [switch]$SkipFrontend,
     [switch]$SkipModels,
     [switch]$Repair,
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [switch]$FunctionsOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,10 +38,11 @@ $FrontendDir = Join-Path $ProjectRoot "frontend"
 $ToolsDir = Join-Path $ProjectRoot "tools"
 $CacheDir = Join-Path $ToolsDir "_cache"
 $LogsDir = Join-Path $ProjectRoot "logs"
+$BackendLogsDir = Join-Path $BackendDir "storage\logs"
 $ModelsDir = Join-Path $BackendDir "storage\models"
 
 # Ensure essential directories exist
-foreach ($dir in @($ToolsDir, $CacheDir, $LogsDir, $ModelsDir)) {
+foreach ($dir in @($ToolsDir, $CacheDir, $LogsDir, $BackendLogsDir, $ModelsDir)) {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
@@ -48,6 +50,8 @@ foreach ($dir in @($ToolsDir, $CacheDir, $LogsDir, $ModelsDir)) {
 
 $Timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogFile = Join-Path $LogsDir "install-$Timestamp.log"
+$LatestLogFile = Join-Path $LogsDir "install.log"
+$BackendLogFile = Join-Path $BackendLogsDir "install.log"
 
 function Write-InstallLog {
     param(
@@ -58,6 +62,8 @@ function Write-InstallLog {
     $timeStr = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logLine = "[$timeStr] [$Level] $Message"
     Add-Content -Path $LogFile -Value $logLine -Encoding UTF8
+    Add-Content -Path $LatestLogFile -Value $logLine -Encoding UTF8
+    Add-Content -Path $BackendLogFile -Value $logLine -Encoding UTF8
     
     $prefix = switch ($Level) {
         "OK"    { "[OK] " }
@@ -78,11 +84,25 @@ function Write-InstallLog {
     Write-Host "$prefix$Message" -ForegroundColor $consoleColor
 }
 
+function Update-SessionPath {
+    try {
+        $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+        $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+        $combined = @($userPath, $machinePath) -join ";"
+        $env:PATH = $combined
+        Write-InstallLog "Refreshed session PATH from Windows Registry." "DEBUG"
+    } catch {
+        Write-InstallLog "Failed to refresh session PATH: $_" "WARN"
+    }
+}
+
 function Download-FileWithProgress {
     param(
         [string]$Url,
         [string]$DestinationPath,
-        [string]$Description = "Downloading file"
+        [string]$Description = "Downloading file",
+        [string]$ExpectedSha256 = "",
+        [bool]$ValidateSignature = $false
     )
     Write-InstallLog "$Description from $Url..." "INFO"
     $destDir = Split-Path -Parent $DestinationPath
@@ -90,67 +110,177 @@ function Download-FileWithProgress {
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
     }
 
-    $tempDest = "$DestinationPath.downloading"
-    if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
+    # Ensure TLS 1.2 is enabled in current PowerShell session
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+    } catch {
+        try {
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]3072
+        } catch {}
+    }
+
+    # Test for System.Net.Http availability
+    $httpClientAvailable = $false
+    try {
+        Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+        $httpClientAvailable = $true
+    } catch {
+        Write-InstallLog "System.Net.Http assembly not preloaded: $($_.Exception.Message). Using native WebClient engine." "DEBUG"
+    }
+
+    # Clean up any stale partial downloads for this destination
+    Get-ChildItem -Path "$DestinationPath.downloading*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $tempDest = "$DestinationPath.downloading_$PID"
+    if (Test-Path $tempDest) { Remove-Item $tempDest -Force -ErrorAction SilentlyContinue }
 
     $maxRetries = 3
     $attempt = 0
-    $success = $false
+    $downloadSuccess = $false
 
-    while ($attempt -lt $maxRetries -and -not $success) {
+    while ($attempt -lt $maxRetries -and -not $downloadSuccess) {
         $attempt++
         try {
-            $handler = New-Object System.Net.Http.HttpClientHandler
-            $client = New-Object System.Net.Http.HttpClient($handler)
-            $client.Timeout = [System.TimeSpan]::FromMinutes(10)
-            $client.DefaultRequestHeaders.Add("User-Agent", "VerbatimAI-Installer/1.4.0 (Windows NT)")
+            if ($httpClientAvailable) {
+                # Engine 1: HttpClient with streaming chunk progress
+                $handler = $null
+                $client = $null
+                $response = $null
+                $stream = $null
+                $fileStream = $null
+                try {
+                    $handler = New-Object System.Net.Http.HttpClientHandler
+                    $client = New-Object System.Net.Http.HttpClient($handler)
+                    $client.Timeout = [System.TimeSpan]::FromMinutes(10)
+                    $client.DefaultRequestHeaders.Add("User-Agent", "VerbatimAI-Installer/1.4.0 (Windows NT)")
 
-            $response = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-            if (-not $response.IsSuccessStatusCode) {
-                throw "HTTP request failed with status code $($response.StatusCode): $($response.ReasonPhrase)"
-            }
-
-            $totalBytes = $response.Content.Headers.ContentLength
-            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-            $fileStream = [System.IO.File]::Create($tempDest)
-
-            $buffer = New-Object byte[] 65536
-            $bytesRead = 0
-            $totalRead = 0
-            $lastPercent = -1
-
-            while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                $fileStream.Write($buffer, 0, $bytesRead)
-                $totalRead += $bytesRead
-                if ($totalBytes -gt 0) {
-                    $percent = [int](($totalRead / $totalBytes) * 100)
-                    if ($percent -ne $lastPercent -and ($percent % 10 -eq 0 -or $percent -eq 100)) {
-                        $lastPercent = $percent
-                        $mbRead = [math]::Round($totalRead / 1MB, 1)
-                        $mbTotal = [math]::Round($totalBytes / 1MB, 1)
-                        Write-Host -NoNewline "`r   Progress: $percent% ($mbRead MB / $mbTotal MB)   "
+                    $response = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                    if (-not $response.IsSuccessStatusCode) {
+                        throw "HTTP request failed with status code $($response.StatusCode): $($response.ReasonPhrase)"
                     }
+
+                    $totalBytes = $response.Content.Headers.ContentLength
+                    $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                    $fileStream = [System.IO.File]::Create($tempDest)
+
+                    $buffer = New-Object byte[] 65536
+                    $bytesRead = 0
+                    $totalRead = 0
+                    $lastPercent = -1
+
+                    while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $fileStream.Write($buffer, 0, $bytesRead)
+                        $totalRead += $bytesRead
+                        if ($totalBytes -gt 0) {
+                            $percent = [int](($totalRead / $totalBytes) * 100)
+                            if ($percent -ne $lastPercent -and ($percent % 10 -eq 0 -or $percent -eq 100)) {
+                                $lastPercent = $percent
+                                $mbRead = [math]::Round($totalRead / 1MB, 1)
+                                $mbTotal = [math]::Round($totalBytes / 1MB, 1)
+                                Write-Host -NoNewline "`r   Progress: $percent% ($mbRead MB / $mbTotal MB)   "
+                            }
+                        }
+                    }
+                    Write-Host ""
+                } finally {
+                    if ($fileStream) { $fileStream.Flush(); $fileStream.Close(); $fileStream.Dispose() }
+                    if ($stream) { $stream.Close(); $stream.Dispose() }
+                    if ($response) { $response.Dispose() }
+                    if ($client) { $client.Dispose() }
+                    if ($handler) { $handler.Dispose() }
+                }
+            } else {
+                # Engine 2: Native WebClient stream with progress
+                $webClient = $null
+                $stream = $null
+                $fileStream = $null
+                try {
+                    $webClient = New-Object System.Net.WebClient
+                    $webClient.Headers.Add("User-Agent", "VerbatimAI-Installer/1.4.0 (Windows NT)")
+
+                    $stream = $webClient.OpenRead($Url)
+                    $totalBytes = -1
+                    if ($webClient.ResponseHeaders["Content-Length"]) {
+                        [long]::TryParse($webClient.ResponseHeaders["Content-Length"], [ref]$totalBytes) | Out-Null
+                    }
+
+                    $fileStream = [System.IO.File]::Create($tempDest)
+                    $buffer = New-Object byte[] 65536
+                    $bytesRead = 0
+                    $totalRead = 0
+                    $lastPercent = -1
+
+                    while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $fileStream.Write($buffer, 0, $bytesRead)
+                        $totalRead += $bytesRead
+                        if ($totalBytes -gt 0) {
+                            $percent = [int](($totalRead / $totalBytes) * 100)
+                            if ($percent -ne $lastPercent -and ($percent % 10 -eq 0 -or $percent -eq 100)) {
+                                $lastPercent = $percent
+                                $mbRead = [math]::Round($totalRead / 1MB, 1)
+                                $mbTotal = [math]::Round($totalBytes / 1MB, 1)
+                                Write-Host -NoNewline "`r   Progress: $percent% ($mbRead MB / $mbTotal MB)   "
+                            }
+                        }
+                    }
+                    Write-Host ""
+                } finally {
+                    if ($fileStream) { $fileStream.Flush(); $fileStream.Close(); $fileStream.Dispose() }
+                    if ($stream) { $stream.Close(); $stream.Dispose() }
+                    if ($webClient) { $webClient.Dispose() }
                 }
             }
-            Write-Host ""
-            $fileStream.Flush()
-            $fileStream.Close()
-            $stream.Close()
-            $client.Dispose()
 
+            # Check that temp file exists and is not empty
+            if (-not (Test-Path $tempDest) -or (Get-Item $tempDest).Length -eq 0) {
+                throw "Downloaded file is empty or missing at $tempDest"
+            }
+
+            # Cryptographic checksum verification (if specified)
+            if ($ExpectedSha256) {
+                Write-InstallLog "Verifying cryptographic checksum for $Description..." "INFO"
+                $actualHash = (Get-FileHash -Path $tempDest -Algorithm SHA256).Hash.ToLower()
+                if ($actualHash -ne $ExpectedSha256.ToLower()) {
+                    Remove-Item $tempDest -Force -ErrorAction SilentlyContinue
+                    throw "Cryptographic SHA256 mismatch for $Description. Expected: $ExpectedSha256, Actual: $actualHash"
+                }
+                Write-InstallLog "Cryptographic SHA256 verified: $actualHash" "OK"
+            }
+
+            # Authenticode signature verification (if specified)
+            if ($ValidateSignature) {
+                Write-InstallLog "Verifying digital signature for $Description..." "INFO"
+                $sig = Get-AuthenticodeSignature -FilePath $tempDest
+                if ($sig.Status -ne "Valid") {
+                    Remove-Item $tempDest -Force -ErrorAction SilentlyContinue
+                    throw "Authenticode signature validation failed for $Description. Status: $($sig.StatusMessage) (Status=$($sig.Status))"
+                }
+                Write-InstallLog "Digital signature verified: $($sig.SignerCertificate.Subject)" "OK"
+            }
+
+            # Atomically finalize download
             if (Test-Path $DestinationPath) { Remove-Item $DestinationPath -Force }
             Move-Item -Path $tempDest -Destination $DestinationPath -Force
-            $success = $true
-            Write-InstallLog "Download completed successfully: $DestinationPath" "OK"
+            $downloadSuccess = $true
+            Write-InstallLog "Download verified and finalized: $DestinationPath" "OK"
         }
         catch {
-            Write-InstallLog "Download attempt $attempt failed: $_" "WARN"
+            Write-InstallLog "Download attempt $attempt failed: $($_.Exception.Message)" "WARN"
             if (Test-Path $tempDest) { Remove-Item $tempDest -Force -ErrorAction SilentlyContinue }
+
+            # Detect fatal non-transient errors
+            $errMsg = $_.Exception.Message
+            if ($errMsg -match "SHA256 mismatch" -or $errMsg -match "signature validation failed") {
+                throw "Integrity check failed: $errMsg"
+            }
+            if ($errMsg -match "404" -or $errMsg -match "NotFound") {
+                throw "Remote resource not found (404): $Url"
+            }
+
             if ($attempt -lt $maxRetries) {
-                Write-InstallLog "Retrying in 5 seconds..." "INFO"
+                Write-InstallLog "Retrying download in 5 seconds (attempt $($attempt + 1) of $maxRetries)..." "INFO"
                 Start-Sleep -Seconds 5
             } else {
-                throw "Failed to download $Url after $maxRetries attempts: $_"
+                throw "Failed to download $Url after $maxRetries attempts: $errMsg"
             }
         }
     }
@@ -161,8 +291,14 @@ function Test-ValidPythonInterpreter {
     if (-not $ExecutablePath -or -not (Test-Path $ExecutablePath)) {
         return $null
     }
+    # Reject 0-byte Microsoft Store execution alias stubs
     if ($ExecutablePath -like "*WindowsApps*") {
-        return $null
+        try {
+            $item = Get-Item $ExecutablePath -ErrorAction SilentlyContinue
+            if ($item -and $item.Length -eq 0) {
+                return $null
+            }
+        } catch {}
     }
     try {
         $pinfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -175,16 +311,18 @@ function Test-ValidPythonInterpreter {
 
         $proc = [System.Diagnostics.Process]::Start($pinfo)
         $proc.WaitForExit(5000) | Out-Null
-        if ($proc.ExitCode -eq 0) {
-            $verStr = $proc.StandardOutput.ReadToEnd().Trim()
-            $parts = $verStr.Split('.')
+        $outStr = $proc.StandardOutput.ReadToEnd().Trim()
+        $errStr = $proc.StandardError.ReadToEnd().Trim()
+
+        if ($proc.ExitCode -eq 0 -and $outStr -notmatch "Microsoft Store" -and $errStr -notmatch "Microsoft Store" -and $outStr -notmatch "Python was not found") {
+            $parts = $outStr.Split('.')
             if ($parts.Length -ge 2) {
                 $major = [int]$parts[0]
                 $minor = [int]$parts[1]
                 if ($major -eq 3 -and $minor -ge 10 -and $minor -le 12) {
                     return @{
                         Path = (Resolve-Path $ExecutablePath).Path
-                        Version = $verStr
+                        Version = $outStr
                         Major = $major
                         Minor = $minor
                     }
@@ -195,6 +333,145 @@ function Test-ValidPythonInterpreter {
     catch {
         return $null
     }
+    return $null
+}
+
+function Find-SystemPython {
+    param(
+        [string]$BackendVirtualEnvPath = ""
+    )
+
+    # 1. Existing backend virtual environment
+    if ($BackendVirtualEnvPath -and (Test-Path $BackendVirtualEnvPath)) {
+        $valid = Test-ValidPythonInterpreter -ExecutablePath $BackendVirtualEnvPath
+        if ($valid) { return $valid }
+    }
+
+    # 2. Python Launcher (py.exe) - check PATH and standard locations
+    $pyLaunchers = @(
+        (Get-Command "py.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+        "C:\Windows\py.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Launcher\py.exe"
+    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+    foreach ($pyL in $pyLaunchers) {
+        # Check py -0p output (lists all registered interpreters with paths)
+        try {
+            $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+            $pinfo.FileName = $pyL
+            $pinfo.Arguments = "-0p"
+            $pinfo.RedirectStandardOutput = $true
+            $pinfo.UseShellExecute = $false
+            $pinfo.CreateNoWindow = $true
+            $proc = [System.Diagnostics.Process]::Start($pinfo)
+            $proc.WaitForExit(4000) | Out-Null
+            if ($proc.ExitCode -eq 0) {
+                $lines = $proc.StandardOutput.ReadToEnd() -split "`r?`n"
+                foreach ($line in $lines) {
+                    if ($line -match '([A-Za-z]:\\[^\s]+\.exe)') {
+                        $candPath = $matches[1]
+                        $valid = Test-ValidPythonInterpreter -ExecutablePath $candPath
+                        if ($valid) { return $valid }
+                    }
+                }
+            }
+        } catch {}
+
+        # Direct py launcher version flags
+        foreach ($arg in @("-3.11", "-3.10", "-3.12", "-3")) {
+            try {
+                $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+                $pinfo.FileName = $pyL
+                $pinfo.Arguments = "$arg -c `"import sys; print(sys.executable)`""
+                $pinfo.RedirectStandardOutput = $true
+                $pinfo.UseShellExecute = $false
+                $pinfo.CreateNoWindow = $true
+                $proc = [System.Diagnostics.Process]::Start($pinfo)
+                $proc.WaitForExit(4000) | Out-Null
+                if ($proc.ExitCode -eq 0) {
+                    $cand = $proc.StandardOutput.ReadToEnd().Trim()
+                    $valid = Test-ValidPythonInterpreter -ExecutablePath $cand
+                    if ($valid) { return $valid }
+                }
+            } catch {}
+        }
+    }
+
+    # 3. python.exe on PATH
+    $pathCommands = Get-Command "python.exe" -All -ErrorAction SilentlyContinue
+    foreach ($cmd in $pathCommands) {
+        if ($cmd.Source -and ($cmd.Source -notlike "*WindowsApps*")) {
+            $valid = Test-ValidPythonInterpreter -ExecutablePath $cmd.Source
+            if ($valid) { return $valid }
+        }
+    }
+
+    # 4. Windows Registry PEP 514 keys (PythonCore)
+    $regHives = @("HKCU:\Software\Python\PythonCore", "HKLM:\SOFTWARE\Python\PythonCore", "HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore")
+    foreach ($hive in $regHives) {
+        if (Test-Path $hive) {
+            $verKeys = Get-ChildItem -Path $hive -ErrorAction SilentlyContinue
+            foreach ($k in $verKeys) {
+                $ipPath = Join-Path $k.PSPath "InstallPath"
+                if (Test-Path $ipPath) {
+                    $prop = Get-ItemProperty -Path $ipPath -ErrorAction SilentlyContinue
+                    $candidates = @($prop.ExecutablePath, (Join-Path $prop.'(default)' "python.exe"))
+                    foreach ($cand in $candidates) {
+                        if ($cand -and (Test-Path $cand)) {
+                            $valid = Test-ValidPythonInterpreter -ExecutablePath $cand
+                            if ($valid) { return $valid }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # 5. Windows Uninstall Registry Keys
+    $uninstallHives = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")
+    foreach ($uHive in $uninstallHives) {
+        if (Test-Path $uHive) {
+            $entries = Get-ChildItem -Path $uHive -ErrorAction SilentlyContinue
+            foreach ($entry in $entries) {
+                $dn = (Get-ItemProperty -Path $entry.PSPath -Name DisplayName -ErrorAction SilentlyContinue).DisplayName
+                if ($dn -and ($dn -like "Python 3.11*" -or $dn -like "Python 3.10*" -or $dn -like "Python 3.12*")) {
+                    $il = (Get-ItemProperty -Path $entry.PSPath -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+                    if ($il) {
+                        $cand = Join-Path $il "python.exe"
+                        if (Test-Path $cand) {
+                            $valid = Test-ValidPythonInterpreter -ExecutablePath $cand
+                            if ($valid) { return $valid }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # 6. Standard User, System, and Package Manager installation directories
+    $commonLocations = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:ProgramFiles\Python311\python.exe",
+        "$env:ProgramFiles\Python310\python.exe",
+        "$env:ProgramFiles\Python312\python.exe",
+        "${env:ProgramFiles(x86)}\Python311\python.exe",
+        "${env:ProgramFiles(x86)}\Python310\python.exe",
+        "${env:ProgramFiles(x86)}\Python312\python.exe",
+        "C:\Python311\python.exe",
+        "C:\Python310\python.exe",
+        "C:\Python312\python.exe",
+        "$env:ALLUSERSPROFILE\chocolatey\bin\python.exe",
+        "$env:USERPROFILE\scoop\apps\python\current\python.exe"
+    )
+    foreach ($loc in $commonLocations) {
+        if (Test-Path $loc) {
+            $valid = Test-ValidPythonInterpreter -ExecutablePath $loc
+            if ($valid) { return $valid }
+        }
+    }
+
     return $null
 }
 
@@ -215,19 +492,28 @@ function Test-ExecutableWorking {
     } catch { return $false }
 }
 
+# Return early if dot-sourced or functions-only mode requested
+if ($MyInvocation.InvocationName -eq '.' -or $FunctionsOnly) {
+    return
+}
+
 # ==============================================================================
-# Banner
+# Banner & Hardware Assessment
 # ==============================================================================
-Clear-Host
-Write-Host "========================================================" -ForegroundColor Magenta
-Write-Host "  Verbatim AI — Unified Complete Windows Installer" -ForegroundColor Magenta
-Write-Host "  Fast Transcription & Maximum Accuracy Out-of-the-Box" -ForegroundColor White
-Write-Host "  Tagline: Every Word Matters." -ForegroundColor Gray
-Write-Host "========================================================" -ForegroundColor Magenta
-Write-Host ""
-Write-InstallLog "Starting VerbatimAI unified complete installation." "INFO"
-Write-InstallLog "Project Directory: $ProjectRoot" "INFO"
-Write-InstallLog "Log File: $LogFile" "INFO"
+$global:CurrentInstallStage = "Hardware Assessment & Resource Audit"
+$global:StageFailureAction = "Ensure your system is a 64-bit Windows operating system with sufficient disk space."
+
+try {
+    Clear-Host
+    Write-Host "========================================================" -ForegroundColor Magenta
+    Write-Host "  Verbatim AI — Unified Complete Windows Installer" -ForegroundColor Magenta
+    Write-Host "  Fast Transcription & Maximum Accuracy Out-of-the-Box" -ForegroundColor White
+    Write-Host "  Tagline: Every Word Matters." -ForegroundColor Gray
+    Write-Host "========================================================" -ForegroundColor Magenta
+    Write-Host ""
+    Write-InstallLog "Starting VerbatimAI unified complete installation." "INFO"
+    Write-InstallLog "Project Directory: $ProjectRoot" "INFO"
+    Write-InstallLog "Log File: $LogFile" "INFO"
 
 # ==============================================================================
 # Upfront Hardware Detection & Resource Assessment
@@ -384,6 +670,8 @@ Write-InstallLog "User confirmed. Proceeding with automated unified installation
 # ==============================================================================
 # Stage 1: Storage Directories & Configuration
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 1/8: Initializing storage directories and configuration"
+$global:StageFailureAction = "Check file and folder permissions in the VerbatimAI directory."
 Write-InstallLog "Stage 1/8: Initializing storage directories and configuration..." "STEP"
 
 $storageDirs = @(
@@ -411,125 +699,86 @@ if (-not (Test-Path $envFile) -and (Test-Path $envExample)) {
 # ==============================================================================
 # Stage 2: Python 3.11 Runtime & Virtual Environment
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 2/8: Establishing Python 3.11 runtime & virtual environment"
+$global:StageFailureAction = "Ensure internet connectivity to python.org or install Python 3.11 from python.org manually."
 Write-InstallLog "Stage 2/8: Establishing Python 3.11 runtime & virtual environment..." "STEP"
 
 $venvDir = Join-Path $BackendDir ".venv"
 $venvPyExe = Join-Path $venvDir "Scripts\python.exe"
-$selectedPython = $null
+$selectedPython = Find-SystemPython -BackendVirtualEnvPath $venvPyExe
 
-# Priority 1: Check existing backend virtual environment
-if (Test-Path $venvPyExe) {
-    $validVenv = Test-ValidPythonInterpreter -ExecutablePath $venvPyExe
-    if ($validVenv) {
-        Write-InstallLog "Existing backend virtual environment detected: $($validVenv.Path) (Python $($validVenv.Version))" "OK"
-        $selectedPython = $validVenv
-    }
-}
+if ($selectedPython) {
+    Write-InstallLog "Compatible Python discovered: $($selectedPython.Path) (Python $($selectedPython.Version))" "OK"
+} else {
+    Write-InstallLog "No compatible Python installation found on system. Initiating automated Python 3.11 setup..." "WARN"
 
-# Priority 2: Check py launcher for 3.11 or 3.10
-if (-not $selectedPython) {
-    $pyLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
-    if ($pyLauncher) {
-        foreach ($arg in @("-3.11", "-3.10", "-3")) {
-            try {
-                $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-                $pinfo.FileName = "py.exe"
-                $pinfo.Arguments = "$arg -c `"import sys; print(sys.executable)`""
-                $pinfo.RedirectStandardOutput = $true
-                $pinfo.UseShellExecute = $false
-                $pinfo.CreateNoWindow = $true
-                $proc = [System.Diagnostics.Process]::Start($pinfo)
-                $proc.WaitForExit(3000) | Out-Null
-                if ($proc.ExitCode -eq 0) {
-                    $cand = $proc.StandardOutput.ReadToEnd().Trim()
-                    $valid = Test-ValidPythonInterpreter -ExecutablePath $cand
-                    if ($valid) {
-                        Write-InstallLog "Found Python via py launcher ($arg): $($valid.Path) (Python $($valid.Version))" "OK"
-                        $selectedPython = $valid
-                        break
-                    }
-                }
-            } catch {}
-        }
-    }
-}
-
-# Priority 3: Check python.exe on PATH (ignoring WindowsApps)
-if (-not $selectedPython) {
-    $pathPy = Get-Command "python.exe" -ErrorAction SilentlyContinue
-    if ($pathPy -and $pathPy.Source -notlike "*WindowsApps*") {
-        $valid = Test-ValidPythonInterpreter -ExecutablePath $pathPy.Source
-        if ($valid) {
-            Write-InstallLog "Found compatible Python on PATH: $($valid.Path) (Python $($valid.Version))" "OK"
-            $selectedPython = $valid
-        }
-    }
-}
-
-# Priority 4: Check standard user and system installation directories
-if (-not $selectedPython) {
-    $commonLocations = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-        "$env:ProgramFiles\Python311\python.exe",
-        "C:\Python311\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
-        "$env:ProgramFiles\Python310\python.exe",
-        "C:\Python310\python.exe"
-    )
-    foreach ($loc in $commonLocations) {
-        $valid = Test-ValidPythonInterpreter -ExecutablePath $loc
-        if ($valid) {
-            Write-InstallLog "Found compatible Python at $loc (Python $($valid.Version))" "OK"
-            $selectedPython = $valid
-            break
-        }
-    }
-}
-
-# Priority 5: Automated Bootstrap of Python 3.11 if missing
-if (-not $selectedPython) {
-    Write-InstallLog "No compatible Python installation found. Initiating automated Python 3.11 setup..." "WARN"
-
-    $installedViaWinget = $false
+    # Step 2A: Attempt user-scope winget installation if winget is available
     $wingetCmd = Get-Command "winget.exe" -ErrorAction SilentlyContinue
-
     if ($wingetCmd) {
         Write-InstallLog "Attempting user-scope Python 3.11 installation via winget..." "INFO"
         try {
             $wingetArgs = "install --id Python.Python.3.11 -e --scope user --accept-source-agreements --accept-package-agreements --silent"
             $p = Start-Process -FilePath "winget.exe" -ArgumentList $wingetArgs -Wait -PassThru -NoNewWindow
-            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
-                Write-InstallLog "winget installation completed." "OK"
-                $installedViaWinget = $true
-            }
-        } catch {}
+            Write-InstallLog "winget invocation completed with exit code $($p.ExitCode)." "INFO"
+        } catch {
+            Write-InstallLog "winget invocation failed: $_" "WARN"
+        }
+
+        # Refresh session environment variables from Windows Registry
+        Update-SessionPath
+
+        # Crucial: Independently rediscover Python before downloading official installer!
+        $selectedPython = Find-SystemPython -BackendVirtualEnvPath $venvPyExe
+        if ($selectedPython) {
+            Write-InstallLog "Python successfully discovered after winget setup: $($selectedPython.Path) (Python $($selectedPython.Version))" "OK"
+        }
     }
 
-    if (-not $installedViaWinget) {
+    # Step 2B: If not found after winget, download and run official Python 3.11.9 installer
+    if (-not $selectedPython) {
+        Write-InstallLog "Bootstrapping official Python 3.11.9 64-bit installer from python.org..." "INFO"
         $pythonInstallerUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
         $installerPath = Join-Path $CacheDir "python-3.11.9-amd64.exe"
+        $officialPythonSha256 = "5ee42c4eee1e6b4464bb23722f90b45303f79442df63083f05322f1785f5fdde"
 
-        Download-FileWithProgress -Url $pythonInstallerUrl -DestinationPath $installerPath -Description "Official Python 3.11.9 Installer"
+        # Check if valid cached installer already exists
+        $needDownload = $true
+        if (Test-Path $installerPath) {
+            $cachedHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash.ToLower()
+            if ($cachedHash -eq $officialPythonSha256.ToLower()) {
+                Write-InstallLog "Verified existing cached Python installer: $installerPath" "OK"
+                $needDownload = $false
+            } else {
+                Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        if ($needDownload) {
+            Download-FileWithProgress `
+                -Url $pythonInstallerUrl `
+                -DestinationPath $installerPath `
+                -Description "Official Python 3.11.9 Installer" `
+                -ExpectedSha256 $officialPythonSha256 `
+                -ValidateSignature $true
+        }
 
         Write-InstallLog "Installing Python 3.11 to user profile (per-user, no admin prompt needed)..." "INFO"
         $installArgs = "/quiet InstallAllUsers=0 Include_pip=1 Include_launcher=1 PrependPath=1 SimpleInstall=1"
         $instProc = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
+        Write-InstallLog "Python installer completed with exit code $($instProc.ExitCode)." "INFO"
+
+        # Refresh session environment variables from Windows Registry
+        Update-SessionPath
+
+        # Re-scan for installed Python
+        $selectedPython = Find-SystemPython -BackendVirtualEnvPath $venvPyExe
     }
 
-    $expectedUserPy = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
-    $valid = Test-ValidPythonInterpreter -ExecutablePath $expectedUserPy
-    if (-not $valid) {
-        $pathPy = Get-Command "python.exe" -ErrorAction SilentlyContinue
-        if ($pathPy) { $valid = Test-ValidPythonInterpreter -ExecutablePath $pathPy.Source }
+    if (-not $selectedPython) {
+        throw "Automated Python 3.11 installation finished, but no functional Python 3.10-3.12 interpreter could be discovered on the system."
     }
 
-    if (-not $valid) {
-        Write-InstallLog "Automated Python installation could not be verified automatically." "ERROR"
-        exit 1
-    }
-
-    $selectedPython = $valid
-    Write-InstallLog "Python 3.11 installed and verified: $($selectedPython.Path)" "OK"
+    Write-InstallLog "Python verified and ready: $($selectedPython.Path) (Python $($selectedPython.Version))" "OK"
 }
 
 # Create backend\.venv
@@ -555,6 +804,8 @@ if (-not (Test-Path $venvPyExe)) {
 # ==============================================================================
 # Stage 3: Python Dependencies (Base + Conditional CUDA)
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 3/8: Installing Python libraries & runtime dependencies"
+$global:StageFailureAction = "Check your internet connection and verify that pip can access PyPI (pypi.org)."
 Write-InstallLog "Stage 3/8: Installing Python libraries & runtime dependencies..." "STEP"
 
 Write-InstallLog "Upgrading pip, setuptools, and wheel..." "INFO"
@@ -614,6 +865,8 @@ Write-InstallLog "Python backend modules verified." "OK"
 # ==============================================================================
 # Stage 4: FFmpeg & FFprobe Setup
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 4/8: Checking FFmpeg and FFprobe audio engine"
+$global:StageFailureAction = "Check your internet connection to download FFmpeg release archives from GitHub or gyan.dev."
 Write-InstallLog "Stage 4/8: Checking FFmpeg and FFprobe audio engine..." "STEP"
 
 $ffmpegToolsDir = Join-Path $ToolsDir "ffmpeg\bin"
@@ -673,6 +926,8 @@ Write-InstallLog "FFmpeg and FFprobe verified and ready." "OK"
 # ==============================================================================
 # Stage 5: Node.js, npm & Production Frontend Build
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 5/8: Checking Node.js, npm, and production frontend"
+$global:StageFailureAction = "Check internet connectivity to nodejs.org, or pre-install Node.js 18+ from nodejs.org."
 Write-InstallLog "Stage 5/8: Checking Node.js, npm, and production frontend..." "STEP"
 
 $distIndex = Join-Path $FrontendDir "dist\index.html"
@@ -707,12 +962,12 @@ if (-not $selectedNode) {
     $nodeZipUrl = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip"
     $nodeZip = Join-Path $CacheDir "node-v20.18.1-win-x64.zip"
 
-    Download-FileWithProgress -Url $nodeZipUrl -DestinationPath $nodeZip -Description "Portable Node.js LTS Archive"
-
-    $nodeHash = (Get-FileHash -Path $nodeZip -Algorithm SHA256).Hash.ToLower()
-    if ($nodeHash -ne "56e5aacdeee7168871721b75819ccacf2367de8761b78eaceacdecd41e04ca03") {
-        throw "Node.js zip checksum mismatch! Corrupted download."
-    }
+    $nodeExpectedSha256 = "56e5aacdeee7168871721b75819ccacf2367de8761b78eaceacdecd41e04ca03"
+    Download-FileWithProgress `
+        -Url $nodeZipUrl `
+        -DestinationPath $nodeZip `
+        -Description "Portable Node.js LTS Archive" `
+        -ExpectedSha256 $nodeExpectedSha256
 
     $nodeTemp = Join-Path $CacheDir "node_extract_temp"
     if (Test-Path $nodeTemp) { Remove-Item $nodeTemp -Recurse -Force }
@@ -775,6 +1030,8 @@ if ($SkipFrontend) {
 # ==============================================================================
 # Stage 6: Core Preset Speech Recognition Models Download
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 6/8: Downloading Core Preset Models (Fast & Maximum Accuracy)"
+$global:StageFailureAction = "Check internet connectivity to HuggingFace (huggingface.co) and ensure ~3 GB free disk space."
 Write-InstallLog "Stage 6/8: Downloading Core Preset Models (Fast & Maximum Accuracy)..." "STEP"
 
 if ($SkipModels) {
@@ -826,6 +1083,8 @@ print('CORE_PRESET_MODELS_READY')
 # ==============================================================================
 # Stage 7: Maximum Accuracy Arbiter Setup (Conditional)
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 7/8: Configuring Maximum Accuracy Arbiter (QwenCleo 4-bit)"
+$global:StageFailureAction = "Ensure compatible NVIDIA GPU with >= 4GB VRAM and ~6.5 GB free disk space."
 Write-InstallLog "Stage 7/8: Configuring Maximum Accuracy Arbiter (QwenCleo 4-bit)..." "STEP"
 
 if ($SkipModels) {
@@ -849,6 +1108,8 @@ if ($SkipModels) {
 # ==============================================================================
 # Stage 8: Final System Verification & State Stamp
 # ==============================================================================
+$global:CurrentInstallStage = "Stage 8/8: Performing final end-to-end system verification"
+$global:StageFailureAction = "Review the installation log for missing dependencies or failed validation assertions."
 Write-InstallLog "Stage 8/8: Performing final end-to-end system verification..." "STEP"
 
 $verifyScript = @"
@@ -1058,4 +1319,31 @@ Write-Host "    $LogFile" -ForegroundColor Gray
 Write-Host "========================================================" -ForegroundColor $(if ($installState.partial_install) {'Yellow'} else {'Green'})
 Write-Host ""
 
-exit 0
+    exit 0
+}
+catch {
+    Write-Host ""
+    Write-Host "========================================================" -ForegroundColor Red
+    Write-Host "  Verbatim AI — Installation Failed!" -ForegroundColor Red
+    Write-Host "========================================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Failing Stage : $global:CurrentInstallStage" -ForegroundColor Yellow
+    Write-Host "  Error Details : $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  Log File Path : $LogFile" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Recommended Action:" -ForegroundColor Yellow
+    Write-Host "    $global:StageFailureAction" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  For support or reporting bugs, please open an issue at:" -ForegroundColor Gray
+    Write-Host "    https://github.com/yousefsabry1/VerbatimAI/issues" -ForegroundColor Gray
+    Write-Host "========================================================" -ForegroundColor Red
+    Write-Host ""
+
+    Write-InstallLog "FATAL ERROR during [$global:CurrentInstallStage]: $($_.Exception.ToString())" "ERROR"
+
+    if (-not $NonInteractive) {
+        Write-Host "Press Enter to exit installer..." -ForegroundColor Gray
+        Read-Host | Out-Null
+    }
+    exit 1
+}
