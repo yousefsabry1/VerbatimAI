@@ -90,46 +90,45 @@ All downloaded weights are stored locally inside `backend/storage/models/`.
 
 ---
 
-## 5. One-Click Windows Installation & Launch
+## 5. Unified One-Click Complete Windows Installation
 
-Verbatim AI includes pre-configured Windows batch launchers in the project root:
+Verbatim AI features a **unified one-click installer**: double-clicking `00_INSTALL.bat` prepares the complete application—including the runtime, tools, frontend, and speech recognition models—so you can start transcribing immediately without extra manual setup.
 
 ```text
 VerbatimAI/
-├── 00_INSTALL.bat                      <-- Step 1: Double-click to install & configure everything automatically
-├── 01_START_VERBATIM_AI.bat            <-- Step 2: Double-click to launch application (GPU/Auto)
-├── 02_CPU_SAFE_START.bat               <-- Alternative: Double-click for 100% CPU Safe Mode on any laptop
-├── 03_CHECK_SYSTEM.bat                 <-- Diagnostic tool to audit hardware, drivers, and tier readiness
-└── 04_SETUP_QWENCLEO_MAX_ACCURACY.bat   <-- Optional: Sets up QwenCleo 4-bit arbiter for Tri-Model Consensus
+├── 00_INSTALL.bat                      <-- Single Entry: Prepares everything (Runtime + Frontend + Models)
+├── 01_START_VERBATIM_AI.bat            <-- Launcher: Starts application server & opens browser (GPU/Auto)
+├── 02_CPU_SAFE_START.bat               <-- CPU Mode: Starts in 100% CPU Safe Mode on any laptop
+├── 03_CHECK_SYSTEM.bat                 <-- Diagnostic Tool: Audits hardware, CUDA, and operational tiers
+└── 04_SETUP_QWENCLEO_MAX_ACCURACY.bat   <-- Advanced / Repair: Standalone QwenCleo arbiter reinstaller
 ```
 
-### Installation Steps & Realistic Timing
+### Unified Installation Flow & Realistic Timing
 1. **Download & Extract**:
-   Download the latest VerbatimAI ZIP from GitHub and extract it to any folder on your machine (paths with spaces or non-C drives are fully supported).
-2. **Run Installer**:
+   Download the latest VerbatimAI release ZIP from GitHub and extract it to any folder on your machine (paths with spaces or non-C drives are fully supported).
+2. **Run Unified Installer**:
    Double-click `00_INSTALL.bat`.
+   - **Hardware Audit**: Automatically detects CPU, RAM, disk space, and NVIDIA GPU/VRAM.
+   - **Upfront Plan**: Calculates exact download and disk requirements, checks free drive space, and displays the plan.
+   - **Single User Confirmation**: Confirms once, then automatically executes all stages:
+     - Bootstraps Python 3.11, portable Node.js, and portable FFmpeg/FFprobe if missing.
+     - Creates the backend virtual environment at `backend/.venv` and installs dependencies.
+     - Compiles the production React frontend bundle to `frontend/dist`.
+     - Automatically downloads the **Fast Transcription** model (Specialized Egyptian Whisper Medium).
+     - Automatically downloads the **Maximum Accuracy** twin model (Whisper Large-v3-Turbo).
+     - Automatically sets up the **QwenCleo 4-bit Arbiter** if a compatible NVIDIA GPU ($\ge 4$ GB VRAM) is detected (or cleanly skips it with explanation on CPU/low-VRAM machines).
    - **Realistic Time Expectation**:
-     - On typical broadband (15–50 Mbps): ~5 to 10 minutes.
-     - On high-speed fiber (100+ Mbps): ~3 to 5 minutes.
-     - If dependencies (Python 3.11, Node.js, FFmpeg) already exist: under 2 minutes.
-   - The installer checks your Windows environment, RAM, and disk space.
-   - Automatically bootstraps Python 3.11, FFmpeg, and Node.js if missing.
-   - Creates the backend virtual environment at `backend/.venv` and installs dependencies.
-   - Automatically compiles the production frontend React bundle to `frontend/dist`.
-   - Records all diagnostic steps into a timestamped log (`logs/install-YYYYMMDD-HHMMSS.log`).
-   - Idempotent: running it a second time quickly verifies and repairs missing components without re-downloading.
-3. **Launch Application**:
+     - Fast fiber (100+ Mbps) with compatible GPU: ~8 to 15 minutes complete.
+     - Standard broadband (25–50 Mbps): ~15 to 25 minutes complete.
+     - On CPU/low-VRAM PCs (without QwenCleo): ~5 to 10 minutes complete.
+     - Re-running `00_INSTALL.bat` takes under 10 seconds: it validates existing components and skips already downloaded models.
+3. **Launch & Start Transcribing Immediately**:
    Double-click `01_START_VERBATIM_AI.bat`.
-   - Pre-verifies backend imports and port 8000 availability.
-   - Polls the `/api/health` healthcheck endpoint until the server is confirmed healthy.
-   - Automatically opens your default web browser to `http://127.0.0.1:8000`.
-   - If Verbatim AI is already running, it brings up your existing session without crashing.
+   - Verifies backend health and automatically opens `http://127.0.0.1:8000`.
+   - Both **Fast Transcription** and **Maximum Accuracy** are immediately marked **READY** with green checkmarks.
+   - Simply drag-and-drop an audio file and click **Start Transcription**!
 4. **CPU-Safe Fallback**:
-   On laptops or PCs without an NVIDIA GPU (or in case of CUDA driver issues), double-click `02_CPU_SAFE_START.bat`. It forces CPU int8 quantization and bypasses all CUDA GPU allocations.
-5. **Optional Full Tri-Model Consensus**:
-   For users with an NVIDIA GPU (>= 4 GB VRAM) who want the full 3-model code-switching arbiter:
-   - Double-click `04_SETUP_QWENCLEO_MAX_ACCURACY.bat`.
-   - Downloads QwenCleo-ASR 4-bit weights (~3.8 GB) and configures the isolated `experimental_venv` (~10–20 minutes depending on bandwidth).
+   On laptops without an NVIDIA GPU (or in case of CUDA driver issues), double-click `02_CPU_SAFE_START.bat`. It forces CPU int8 quantization, bypassing all GPU allocations while preserving full dual-model consensus transcription.
 
 > [!TIP]
 > **Windows SmartScreen Note**:  
@@ -144,9 +143,9 @@ VerbatimAI/
 
 1. **Upload Audio**: Drag and drop any voice note or audio file into the workspace.
 2. **Select Mode**:
-   - Choose **Fast Transcription** for quick results.
-   - Choose **Maximum Accuracy — Experimental** for complex or code-switched recordings.
-3. **Download Model (First-Time Only)**: If the selected model is not on your disk, click **Download Model** directly inside the card.
+   - Choose **Fast Transcription** for quick turnaround (~22x faster than real-time).
+   - Choose **Maximum Accuracy — Experimental** for complex, bilingual, or noisy recordings.
+3. **Ready Out-of-the-Box**: Models are already downloaded and verified by `00_INSTALL.bat`—no waiting or manual downloading needed!
 4. **Start Transcription**: Click **Start Transcription**. Progress is streamed live with stage updates.
 5. **Interactive Review**:
    - **Click-to-Seek**: Click any timestamp in the transcript to jump playback to that exact point in time.

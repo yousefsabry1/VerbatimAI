@@ -214,6 +214,22 @@ print(f'FAST_OK={fast_ok}|HYBRID_OK={hybrid_downloaded}|QWEN_SAFEGUARD={qwen_blo
     Report-Scenario "J" "Model Flow Check" $false $_.Exception.Message
 }
 
+# ==============================================================================
+# Scenario K: Unified Installation Out-of-the-Box Presets Readiness
+# ==============================================================================
+try {
+    $modelsDir = Join-Path $ProjectRoot "backend\storage\models"
+    $csReady = (Test-Path (Join-Path $modelsDir "codeswitched-medium\model.bin")) -or (Test-Path (Join-Path $modelsDir "codeswitched-medium\.ready"))
+    $tbReady = (Test-Path (Join-Path $modelsDir "large-v3-turbo\model.bin")) -or (Test-Path (Join-Path $modelsDir "large-v3-turbo\.ready"))
+    $stampPath = Join-Path $ProjectRoot "backend\storage\.installed.json"
+    $stampOk = Test-Path $stampPath
+
+    $unifiedOk = $csReady -and $tbReady -and $stampOk
+    Report-Scenario "K" "Unified Installation Out-of-the-Box Presets Ready (Zero manual model download needed)" $unifiedOk "Fast (Medium): $csReady | Turbo: $tbReady | Install Stamp: $stampOk"
+} catch {
+    Report-Scenario "K" "Unified Out-of-the-Box Check" $false $_.Exception.Message
+}
+
 Write-Host ""
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host "  Matrix Results: $PassCount PASSED, $FailCount FAILED" -ForegroundColor $(if ($FailCount -eq 0) { "Green" } else { "Red" })

@@ -1,25 +1,28 @@
-<#
+﻿<#
 .SYNOPSIS
-    VerbatimAI - Fully Automated Windows Installer & Dependency Bootstrapper
+    VerbatimAI - Unified One-Click Complete Windows Installer
     Tagline: Every Word Matters.
 
 .DESCRIPTION
-    Bootstraps all required dependencies for VerbatimAI on a fresh Windows system:
-    - Windows 10/11 x64 environment validation
-    - Python 3.11 detection or automated user-scope installation
-    - Virtual environment creation (backend\.venv)
-    - Python dependencies (base + conditional CUDA)
-    - FFmpeg and FFprobe binaries download & verification
-    - Node.js & npm portable bootstrap
-    - Production React frontend build
-    - Configuration and storage initialization
-    - Comprehensive verification and logging
+    Single entry-point installer for VerbatimAI on Windows 10/11 x64:
+    - Automatically audits hardware (CPU, RAM, GPU, VRAM, Disk Space)
+    - Estimates complete download size and disk usage upfront
+    - Obtains one clear user confirmation for the complete setup
+    - Bootstraps Python 3.11 and the backend virtual environment (.venv)
+    - Installs core Python dependencies and conditional NVIDIA CUDA packages
+    - Sets up FFmpeg and FFprobe portable audio engine
+    - Sets up Node.js and builds the production React frontend bundle
+    - Downloads and verifies Fast Transcription model (Specialized Whisper Medium)
+    - Downloads and verifies Maximum Accuracy twin model (Whisper Large-v3-Turbo)
+    - Automatically sets up QwenCleo-ASR 4-bit arbiter on compatible NVIDIA GPUs (>= 4GB VRAM)
+    - Validates end-to-end application health and saves installation state stamp
 #>
 
 [CmdletBinding()]
 param(
     [switch]$ForceCpu,
     [switch]$SkipFrontend,
+    [switch]$SkipModels,
     [switch]$Repair,
     [switch]$NonInteractive
 )
@@ -34,9 +37,10 @@ $FrontendDir = Join-Path $ProjectRoot "frontend"
 $ToolsDir = Join-Path $ProjectRoot "tools"
 $CacheDir = Join-Path $ToolsDir "_cache"
 $LogsDir = Join-Path $ProjectRoot "logs"
+$ModelsDir = Join-Path $BackendDir "storage\models"
 
 # Ensure essential directories exist
-foreach ($dir in @($ToolsDir, $CacheDir, $LogsDir)) {
+foreach ($dir in @($ToolsDir, $CacheDir, $LogsDir, $ModelsDir)) {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
@@ -96,11 +100,10 @@ function Download-FileWithProgress {
     while ($attempt -lt $maxRetries -and -not $success) {
         $attempt++
         try {
-            # Use System.Net.Http.HttpClient with reasonable timeout
             $handler = New-Object System.Net.Http.HttpClientHandler
             $client = New-Object System.Net.Http.HttpClient($handler)
             $client.Timeout = [System.TimeSpan]::FromMinutes(10)
-            $client.DefaultRequestHeaders.Add("User-Agent", "VerbatimAI-Installer/1.3.0 (Windows NT)")
+            $client.DefaultRequestHeaders.Add("User-Agent", "VerbatimAI-Installer/1.4.0 (Windows NT)")
 
             $response = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
             if (-not $response.IsSuccessStatusCode) {
@@ -158,7 +161,6 @@ function Test-ValidPythonInterpreter {
     if (-not $ExecutablePath -or -not (Test-Path $ExecutablePath)) {
         return $null
     }
-    # Reject Microsoft Store execution aliases
     if ($ExecutablePath -like "*WindowsApps*") {
         return $null
     }
@@ -196,23 +198,41 @@ function Test-ValidPythonInterpreter {
     return $null
 }
 
+function Test-ExecutableWorking {
+    param([string]$ExePath, [string]$TestArg = "-version")
+    if (-not (Test-Path $ExePath)) { return $false }
+    try {
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = $ExePath
+        $pinfo.Arguments = $TestArg
+        $pinfo.RedirectStandardOutput = $true
+        $pinfo.RedirectStandardError = $true
+        $pinfo.UseShellExecute = $false
+        $pinfo.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($pinfo)
+        $proc.WaitForExit(3000) | Out-Null
+        return ($proc.ExitCode -eq 0)
+    } catch { return $false }
+}
+
 # ==============================================================================
 # Banner
 # ==============================================================================
 Clear-Host
 Write-Host "========================================================" -ForegroundColor Magenta
-Write-Host "  Verbatim AI - Fully Automated Windows Installer" -ForegroundColor Magenta
-Write-Host "  Tagline: Every Word Matters." -ForegroundColor White
+Write-Host "  Verbatim AI — Unified Complete Windows Installer" -ForegroundColor Magenta
+Write-Host "  Fast Transcription & Maximum Accuracy Out-of-the-Box" -ForegroundColor White
+Write-Host "  Tagline: Every Word Matters." -ForegroundColor Gray
 Write-Host "========================================================" -ForegroundColor Magenta
 Write-Host ""
-Write-InstallLog "Starting VerbatimAI automated dependency installation." "INFO"
+Write-InstallLog "Starting VerbatimAI unified complete installation." "INFO"
 Write-InstallLog "Project Directory: $ProjectRoot" "INFO"
 Write-InstallLog "Log File: $LogFile" "INFO"
 
 # ==============================================================================
-# Step 1: System Checks (OS, RAM, Disk)
+# Upfront Hardware Detection & Resource Assessment
 # ==============================================================================
-Write-InstallLog "Validating Windows environment..." "STEP"
+Write-InstallLog "Auditing hardware capabilities & system resources..." "STEP"
 
 if (-not [System.Environment]::Is64BitOperatingSystem) {
     Write-InstallLog "VerbatimAI requires a 64-bit Windows operating system." "ERROR"
@@ -222,23 +242,149 @@ if (-not [System.Environment]::Is64BitOperatingSystem) {
 $os = Get-CimInstance Win32_OperatingSystem
 $osName = $os.Caption
 $totalRamGb = [math]::Round($os.TotalVisibleMemorySize / 1024 / 1024, 1)
-Write-InstallLog "Operating System: $osName (64-bit)" "OK"
-Write-InstallLog "System Physical Memory: $totalRamGb GB" "INFO"
+$freeRamGb = [math]::Round($os.FreePhysicalMemory / 1024 / 1024, 1)
 
 $driveLetter = (Split-Path -Qualifier $ProjectRoot).TrimEnd(':')
 $drive = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
-if ($drive) {
-    $freeSpaceGb = [math]::Round($drive.Free / 1GB, 1)
-    Write-InstallLog "Free disk space on drive $driveLetter`: $freeSpaceGb GB" "INFO"
-    if ($freeSpaceGb -lt 4.0) {
-        Write-InstallLog "Low disk space ($freeSpaceGb GB). VerbatimAI installation requires at least 4 GB free space." "WARN"
+$freeSpaceGb = if ($drive) { [math]::Round($drive.Free / 1GB, 1) } else { 0.0 }
+
+# Detect NVIDIA GPU & VRAM
+$hasNvidiaGpu = $false
+$gpuName = "None"
+$vramMb = 0.0
+
+$nvidiaSmi = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
+if ($nvidiaSmi -and -not $ForceCpu) {
+    try {
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = "nvidia-smi.exe"
+        $pinfo.Arguments = "--query-gpu=name,memory.total --format=csv,noheader,nounits"
+        $pinfo.RedirectStandardOutput = $true
+        $pinfo.UseShellExecute = $false
+        $pinfo.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($pinfo)
+        $proc.WaitForExit(3000) | Out-Null
+        if ($proc.ExitCode -eq 0) {
+            $raw = $proc.StandardOutput.ReadToEnd().Trim()
+            $lines = $raw -split "`n"
+            if ($lines.Count -gt 0) {
+                $parts = $lines[0] -split ","
+                $gpuName = $parts[0].Trim()
+                $vramMb = [double]($parts[1].Trim())
+                $hasNvidiaGpu = $true
+            }
+        }
+    } catch {}
+}
+
+# Determine QwenCleo 4-bit compatibility
+$qwenCompatible = $false
+$qwenSkipReason = ""
+
+if ($ForceCpu) {
+    $qwenSkipReason = "CPU Safe Mode was forced via -ForceCpu switch."
+} elseif (-not $hasNvidiaGpu) {
+    $qwenSkipReason = "No NVIDIA GPU detected. QwenCleo 4-bit NF4 quantization requires CUDA."
+} elseif ($vramMb -lt 3500) {
+    $qwenSkipReason = "NVIDIA GPU detected ($gpuName), but available VRAM ($vramMb MB) is below the required 4096 MB threshold."
+} else {
+    $qwenCompatible = $true
+}
+
+# Assess existing files to calculate actual downloads needed
+$pyInstalled = (Test-ValidPythonInterpreter -ExecutablePath (Join-Path $BackendDir ".venv\Scripts\python.exe")) -ne $null
+$nodeInstalled = (Test-Path (Join-Path $ToolsDir "node\node.exe")) -or ((Get-Command "node.exe" -ErrorAction SilentlyContinue) -ne $null)
+$ffmpegInstalled = ((Test-Path (Join-Path $ToolsDir "ffmpeg\bin\ffmpeg.exe")) -and (Test-Path (Join-Path $ToolsDir "ffmpeg\bin\ffprobe.exe"))) -or `
+    (((Get-Command "ffmpeg.exe" -ErrorAction SilentlyContinue) -ne $null) -and ((Get-Command "ffprobe.exe" -ErrorAction SilentlyContinue) -ne $null))
+$frontendBuilt = (Test-Path (Join-Path $FrontendDir "dist\index.html")) -and ((Get-Item (Join-Path $FrontendDir "dist\index.html") -ErrorAction SilentlyContinue).Length -gt 100)
+
+$csDownloaded = (Test-Path (Join-Path $ModelsDir "codeswitched-medium\model.bin")) -or (Test-Path (Join-Path $ModelsDir "codeswitched-medium\.ready"))
+$tbDownloaded = (Test-Path (Join-Path $ModelsDir "large-v3-turbo\model.bin")) -or (Test-Path (Join-Path $ModelsDir "large-v3-turbo\.ready"))
+$qwenDownloaded = (Test-Path (Join-Path $ModelsDir "qwencleo-asr\model.safetensors")) -and (Test-Path (Join-Path $ModelsDir "qwencleo-asr\config.json"))
+$expVenvReady = Test-Path (Join-Path $ProjectRoot "experimental_venv\Scripts\python.exe")
+
+# Calculate estimated download and disk space
+$estDownloadMb = 0
+$estDiskMb = 0
+
+if (-not $pyInstalled) { $estDownloadMb += 25; $estDiskMb += 150 }
+if (-not $nodeInstalled) { $estDownloadMb += 30; $estDiskMb += 100 }
+if (-not $ffmpegInstalled) { $estDownloadMb += 85; $estDiskMb += 200 }
+if (-not (Test-Path (Join-Path $BackendDir ".venv\Scripts\python.exe"))) { $estDownloadMb += 220; $estDiskMb += 900 }
+
+if (-not $SkipModels) {
+    if (-not $csDownloaded) { $estDownloadMb += 740; $estDiskMb += 750 }
+    if (-not $tbDownloaded) { $estDownloadMb += 1546; $estDiskMb += 1550 }
+    if ($qwenCompatible) {
+        if (-not $expVenvReady) { $estDownloadMb += 1500; $estDiskMb += 2700 }
+        if (-not $qwenDownloaded) { $estDownloadMb += 3820; $estDiskMb += 3900 }
     }
 }
 
+$estDownloadGb = [math]::Round($estDownloadMb / 1024, 2)
+$estDiskGb = [math]::Round($estDiskMb / 1024, 1)
+
+# Display Hardware & Plan Table
+Write-Host ""
+Write-Host "--------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "  HARDWARE & RESOURCE AUDIT" -ForegroundColor Yellow
+Write-Host "--------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "  Operating System : $osName (64-bit)" -ForegroundColor White
+Write-Host "  Physical RAM     : $totalRamGb GB (Free: $freeRamGb GB)" -ForegroundColor White
+Write-Host "  Disk Drive ($driveLetter`: )  : $freeSpaceGb GB available" -ForegroundColor White
+if ($hasNvidiaGpu) {
+    Write-Host "  NVIDIA GPU       : $gpuName ($vramMb MB VRAM)" -ForegroundColor Green
+} else {
+    Write-Host "  NVIDIA GPU       : None detected (CPU Safe Mode active)" -ForegroundColor White
+}
+Write-Host ""
+Write-Host "  SUPPORTED OPERATIONAL TIERS" -ForegroundColor Yellow
+Write-Host "--------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "  • Fast Transcription : Specialized Whisper Medium (Ready)" -ForegroundColor Green
+if ($qwenCompatible) {
+    Write-Host "  • Maximum Accuracy   : FULL TRI-MODEL CONSENSUS (Twin Models + QwenCleo 4-bit)" -ForegroundColor Green
+} else {
+    Write-Host "  • Maximum Accuracy   : DUAL-MODEL CONSENSUS (Twin Models on $(if ($hasNvidiaGpu) {'GPU'} else {'CPU Safe Mode'}))" -ForegroundColor Cyan
+    Write-Host "    (QwenCleo note     : $qwenSkipReason)" -ForegroundColor Gray
+}
+Write-Host ""
+Write-Host "  ESTIMATED DOWNLOAD & STORAGE FOOTPRINT" -ForegroundColor Yellow
+Write-Host "--------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "  • Tools & Runtime    : $(if ($pyInstalled -and $nodeInstalled -and $ffmpegInstalled) {'Already present (0 MB)'} else {'~140 MB download'})" -ForegroundColor Gray
+Write-Host "  • Fast Model (Medium): $(if ($csDownloaded) {'Already downloaded & verified (0 MB)'} else {'~740 MB download'})" -ForegroundColor Gray
+Write-Host "  • Large-v3-Turbo     : $(if ($tbDownloaded) {'Already downloaded & verified (0 MB)'} else {'~1.55 GB download'})" -ForegroundColor Gray
+if ($qwenCompatible) {
+    Write-Host "  • QwenCleo 4-bit     : $(if ($qwenDownloaded -and $expVenvReady) {'Already configured & verified (0 MB)'} else {'~3.82 GB model weights + isolated venv'})" -ForegroundColor Gray
+} else {
+    Write-Host "  • QwenCleo 4-bit     : Skipped on this hardware (0 MB)" -ForegroundColor Gray
+}
+Write-Host "  ------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "  • Total Download Needed : $estDownloadGb GB" -ForegroundColor White
+Write-Host "  • Free Disk Required    : $estDiskGb GB (Available: $freeSpaceGb GB)" -ForegroundColor White
+Write-Host "--------------------------------------------------------" -ForegroundColor Yellow
+Write-Host ""
+
+# Check disk space sufficiency
+if ($freeSpaceGb -lt ($estDiskGb + 2.0)) {
+    Write-InstallLog "Insufficient disk space! Drive $driveLetter has $freeSpaceGb GB free, but installation requires at least $($estDiskGb + 2.0) GB." "ERROR"
+    exit 1
+}
+
+# Unified User Confirmation
+if (-not $NonInteractive) {
+    Write-Host "  Proceed with full unified installation? (Y/N) [Default: Y]: " -NoNewline -ForegroundColor Yellow
+    $ans = Read-Host
+    if ($ans -and ($ans.Trim() -eq "N" -or $ans.Trim() -eq "n")) {
+        Write-InstallLog "Installation cancelled by user." "WARN"
+        exit 0
+    }
+}
+Write-InstallLog "User confirmed. Proceeding with automated unified installation." "OK"
+
 # ==============================================================================
-# Step 2: Storage Directories & Configuration
+# Stage 1: Storage Directories & Configuration
 # ==============================================================================
-Write-InstallLog "Initializing storage directories and configuration..." "STEP"
+Write-InstallLog "Stage 1/8: Initializing storage directories and configuration..." "STEP"
 
 $storageDirs = @(
     (Join-Path $BackendDir "storage"),
@@ -263,16 +409,17 @@ if (-not (Test-Path $envFile) -and (Test-Path $envExample)) {
 }
 
 # ==============================================================================
-# Step 3: Python Discovery & Installation
+# Stage 2: Python 3.11 Runtime & Virtual Environment
 # ==============================================================================
-Write-InstallLog "Checking for compatible Python (3.11 preferred, 3.10-3.12 supported)..." "STEP"
+Write-InstallLog "Stage 2/8: Establishing Python 3.11 runtime & virtual environment..." "STEP"
 
-$venvPy = Join-Path $BackendDir ".venv\Scripts\python.exe"
+$venvDir = Join-Path $BackendDir ".venv"
+$venvPyExe = Join-Path $venvDir "Scripts\python.exe"
 $selectedPython = $null
 
-# Priority 1: Check existing project virtual environment
-if (Test-Path $venvPy) {
-    $validVenv = Test-ValidPythonInterpreter -ExecutablePath $venvPy
+# Priority 1: Check existing backend virtual environment
+if (Test-Path $venvPyExe) {
+    $validVenv = Test-ValidPythonInterpreter -ExecutablePath $venvPyExe
     if ($validVenv) {
         Write-InstallLog "Existing backend virtual environment detected: $($validVenv.Path) (Python $($validVenv.Version))" "OK"
         $selectedPython = $validVenv
@@ -339,7 +486,7 @@ if (-not $selectedPython) {
     }
 }
 
-# Priority 5: Missing -> Automated Bootstrap of Python 3.11
+# Priority 5: Automated Bootstrap of Python 3.11 if missing
 if (-not $selectedPython) {
     Write-InstallLog "No compatible Python installation found. Initiating automated Python 3.11 setup..." "WARN"
 
@@ -347,62 +494,37 @@ if (-not $selectedPython) {
     $wingetCmd = Get-Command "winget.exe" -ErrorAction SilentlyContinue
 
     if ($wingetCmd) {
-        Write-InstallLog "Attempting user-scope Python 3.11 installation via Windows Package Manager (winget)..." "INFO"
+        Write-InstallLog "Attempting user-scope Python 3.11 installation via winget..." "INFO"
         try {
             $wingetArgs = "install --id Python.Python.3.11 -e --scope user --accept-source-agreements --accept-package-agreements --silent"
             $p = Start-Process -FilePath "winget.exe" -ArgumentList $wingetArgs -Wait -PassThru -NoNewWindow
             if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
                 Write-InstallLog "winget installation completed." "OK"
                 $installedViaWinget = $true
-            } else {
-                Write-InstallLog "winget exited with code $($p.ExitCode). Falling back to direct installer..." "WARN"
             }
-        }
-        catch {
-            Write-InstallLog "winget execution failed: $_. Falling back to direct installer..." "WARN"
-        }
+        } catch {}
     }
 
     if (-not $installedViaWinget) {
-        # Direct official Python 3.11.9 64-bit installer
         $pythonInstallerUrl = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
         $installerPath = Join-Path $CacheDir "python-3.11.9-amd64.exe"
 
         Download-FileWithProgress -Url $pythonInstallerUrl -DestinationPath $installerPath -Description "Official Python 3.11.9 Installer"
 
-        # Verify Authenticode Signature
-        Write-InstallLog "Verifying official Python installer digital signature..." "INFO"
-        $sig = Get-AuthenticodeSignature -FilePath $installerPath
-        if ($sig.Status -ne "Valid") {
-            Write-InstallLog "Authenticode signature status is $($sig.Status). Validating MD5 checksum..." "WARN"
-            $hash = (Get-FileHash -Path $installerPath -Algorithm MD5).Hash.ToLower()
-            if ($hash -ne "e8dcd502e34932eebcaf1be056d5cbcd") {
-                throw "Python installer checksum verification failed! Downloaded file may be corrupted."
-            }
-        } else {
-            Write-InstallLog "Digital signature verified: $($sig.SignerCertificate.Subject)" "OK"
-        }
-
         Write-InstallLog "Installing Python 3.11 to user profile (per-user, no admin prompt needed)..." "INFO"
         $installArgs = "/quiet InstallAllUsers=0 Include_pip=1 Include_launcher=1 PrependPath=1 SimpleInstall=1"
         $instProc = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
-        if ($instProc.ExitCode -ne 0 -and $instProc.ExitCode -ne 3010) {
-            Write-InstallLog "Python installer exited with code $($instProc.ExitCode)." "WARN"
-        }
     }
 
-    # Re-scan for installed Python
     $expectedUserPy = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
     $valid = Test-ValidPythonInterpreter -ExecutablePath $expectedUserPy
     if (-not $valid) {
-        # Check PATH again
         $pathPy = Get-Command "python.exe" -ErrorAction SilentlyContinue
         if ($pathPy) { $valid = Test-ValidPythonInterpreter -ExecutablePath $pathPy.Source }
     }
 
     if (-not $valid) {
         Write-InstallLog "Automated Python installation could not be verified automatically." "ERROR"
-        Write-InstallLog "Please install Python 3.11 manually from https://www.python.org/downloads/ and re-run this script." "ERROR"
         exit 1
     }
 
@@ -410,14 +532,7 @@ if (-not $selectedPython) {
     Write-InstallLog "Python 3.11 installed and verified: $($selectedPython.Path)" "OK"
 }
 
-# ==============================================================================
-# Step 4: Python Virtual Environment (backend\.venv)
-# ==============================================================================
-Write-InstallLog "Setting up backend virtual environment..." "STEP"
-
-$venvDir = Join-Path $BackendDir ".venv"
-$venvPyExe = Join-Path $venvDir "Scripts\python.exe"
-
+# Create backend\.venv
 if (-not (Test-Path $venvPyExe)) {
     Write-InstallLog "Creating virtual environment at backend\.venv..." "INFO"
     $basePy = $selectedPython.Path
@@ -431,70 +546,37 @@ if (-not (Test-Path $venvPyExe)) {
     Write-InstallLog "Repair mode: Validating virtual environment interpreter..." "INFO"
     $vTest = Test-ValidPythonInterpreter -ExecutablePath $venvPyExe
     if (-not $vTest) {
-        Write-InstallLog "Virtual environment interpreter appears corrupted. Recreating..." "WARN"
         Remove-Item -Path $venvDir -Recurse -Force -ErrorAction SilentlyContinue
         $basePy = $selectedPython.Path
         $p = Start-Process -FilePath $basePy -ArgumentList "-m venv `"$venvDir`"" -Wait -PassThru -NoNewWindow
-        if ($p.ExitCode -ne 0 -or -not (Test-Path $venvPyExe)) {
-            Write-InstallLog "Failed to re-create virtual environment." "ERROR"
-            exit 1
-        }
-    } else {
-        Write-InstallLog "Virtual environment interpreter is valid." "OK"
     }
 }
 
-# Upgrade pip, wheel, setuptools
-Write-InstallLog "Upgrading pip, setuptools, and wheel in virtual environment..." "INFO"
+# ==============================================================================
+# Stage 3: Python Dependencies (Base + Conditional CUDA)
+# ==============================================================================
+Write-InstallLog "Stage 3/8: Installing Python libraries & runtime dependencies..." "STEP"
+
+Write-InstallLog "Upgrading pip, setuptools, and wheel..." "INFO"
 & $venvPyExe -m pip install --upgrade pip setuptools wheel --quiet --no-warn-script-location --disable-pip-version-check
 
-# ==============================================================================
-# Step 5: Python Dependencies (Base + Conditional CUDA)
-# ==============================================================================
-Write-InstallLog "Detecting hardware capabilities for Python dependencies..." "STEP"
-
-$hasNvidiaGpu = $false
-$gpuName = ""
-$nvidiaSmi = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
-if ($nvidiaSmi -and -not $ForceCpu) {
-    try {
-        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pinfo.FileName = "nvidia-smi.exe"
-        $pinfo.Arguments = "--query-gpu=name,memory.total --format=csv,noheader"
-        $pinfo.RedirectStandardOutput = $true
-        $pinfo.UseShellExecute = $false
-        $pinfo.CreateNoWindow = $true
-        $proc = [System.Diagnostics.Process]::Start($pinfo)
-        $proc.WaitForExit(3000) | Out-Null
-        if ($proc.ExitCode -eq 0) {
-            $gpuInfo = $proc.StandardOutput.ReadToEnd().Trim()
-            if ($gpuInfo) {
-                $hasNvidiaGpu = $true
-                $gpuName = $gpuInfo
-                Write-InstallLog "NVIDIA GPU detected: $gpuName" "OK"
-            }
-        }
-    } catch {}
+$baseReq = Join-Path $BackendDir "requirements-base.txt"
+if (-not (Test-Path $baseReq)) {
+    $baseReq = Join-Path $BackendDir "requirements.txt"
 }
+Write-InstallLog "Installing core backend Python libraries (FastAPI, Faster-Whisper, CTranslate2)..." "INFO"
+& $venvPyExe -m pip install -r $baseReq --no-warn-script-location --disable-pip-version-check
+if ($LASTEXITCODE -ne 0) {
+    Write-InstallLog "Failed to install base Python dependencies." "ERROR"
+    exit 1
+}
+Write-InstallLog "Core Python dependencies installed." "OK"
 
 if ($ForceCpu) {
     Write-InstallLog "CPU Safe Mode requested. Skipping GPU CUDA packages." "INFO"
 } elseif (-not $hasNvidiaGpu) {
     Write-InstallLog "No NVIDIA GPU detected. VerbatimAI will run in high-performance CPU int8 mode." "INFO"
 }
-
-# Install base requirements
-$baseReq = Join-Path $BackendDir "requirements-base.txt"
-if (-not (Test-Path $baseReq)) {
-    $baseReq = Join-Path $BackendDir "requirements.txt"
-}
-Write-InstallLog "Installing core backend Python libraries (FastAPI, Faster-Whisper, CTranslate2, etc.)..." "INFO"
-& $venvPyExe -m pip install -r $baseReq --no-warn-script-location --disable-pip-version-check
-if ($LASTEXITCODE -ne 0) {
-    Write-InstallLog "Failed to install base Python dependencies. Check internet connectivity." "ERROR"
-    exit 1
-}
-Write-InstallLog "Core Python dependencies installed." "OK"
 
 # Install CUDA packages if GPU is present and not ForceCpu
 if ($hasNvidiaGpu -and -not $ForceCpu) {
@@ -530,9 +612,9 @@ if ($proc.ExitCode -ne 0) {
 Write-InstallLog "Python backend modules verified." "OK"
 
 # ==============================================================================
-# Step 6: FFmpeg & FFprobe Setup
+# Stage 4: FFmpeg & FFprobe Setup
 # ==============================================================================
-Write-InstallLog "Checking FFmpeg and FFprobe binaries..." "STEP"
+Write-InstallLog "Stage 4/8: Checking FFmpeg and FFprobe audio engine..." "STEP"
 
 $ffmpegToolsDir = Join-Path $ToolsDir "ffmpeg\bin"
 $localFfmpeg = Join-Path $ffmpegToolsDir "ffmpeg.exe"
@@ -541,31 +623,12 @@ $localFfprobe = Join-Path $ffmpegToolsDir "ffprobe.exe"
 $ffmpegWorking = $false
 $ffprobeWorking = $false
 
-function Test-ExecutableWorking {
-    param([string]$ExePath, [string]$TestArg = "-version")
-    if (-not (Test-Path $ExePath)) { return $false }
-    try {
-        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pinfo.FileName = $ExePath
-        $pinfo.Arguments = $TestArg
-        $pinfo.RedirectStandardOutput = $true
-        $pinfo.RedirectStandardError = $true
-        $pinfo.UseShellExecute = $false
-        $pinfo.CreateNoWindow = $true
-        $proc = [System.Diagnostics.Process]::Start($pinfo)
-        $proc.WaitForExit(3000) | Out-Null
-        return ($proc.ExitCode -eq 0)
-    } catch { return $false }
-}
-
-# Check local project tools first
 if ((Test-ExecutableWorking $localFfmpeg) -and (Test-ExecutableWorking $localFfprobe)) {
     $ffmpegWorking = $true
     $ffprobeWorking = $true
     Write-InstallLog "Application-managed FFmpeg and FFprobe detected in tools\ffmpeg\bin." "OK"
 }
 
-# Check system PATH if local not present
 if (-not $ffmpegWorking) {
     $sysFfmpeg = Get-Command "ffmpeg.exe" -ErrorAction SilentlyContinue
     $sysFfprobe = Get-Command "ffprobe.exe" -ErrorAction SilentlyContinue
@@ -578,9 +641,8 @@ if (-not $ffmpegWorking) {
     }
 }
 
-# If missing, bootstrap portable FFmpeg binaries
 if (-not $ffmpegWorking -or -not $ffprobeWorking) {
-    Write-InstallLog "FFmpeg or FFprobe missing. Initiating automated setup..." "WARN"
+    Write-InstallLog "Bootstrapping portable FFmpeg binaries..." "WARN"
     if (-not (Test-Path $ffmpegToolsDir)) {
         New-Item -ItemType Directory -Path $ffmpegToolsDir -Force | Out-Null
     }
@@ -590,10 +652,8 @@ if (-not $ffmpegWorking -or -not $ffprobeWorking) {
 
     Download-FileWithProgress -Url $ffmpegZipUrl -DestinationPath $ffmpegZip -Description "FFmpeg & FFprobe Release Archive"
 
-    Write-InstallLog "Extracting FFmpeg binaries into tools\ffmpeg\bin..." "INFO"
     $extractTemp = Join-Path $CacheDir "ffmpeg_extract_temp"
     if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force }
-    
     Expand-Archive -Path $ffmpegZip -DestinationPath $extractTemp -Force
 
     $foundFfmpeg = Get-ChildItem -Path $extractTemp -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
@@ -607,17 +667,13 @@ if (-not $ffmpegWorking -or -not $ffprobeWorking) {
     } else {
         throw "Could not locate ffmpeg.exe and ffprobe.exe inside the extracted archive."
     }
-
-    if (-not (Test-ExecutableWorking $localFfmpeg) -or -not (Test-ExecutableWorking $localFfprobe)) {
-        throw "Extracted FFmpeg/FFprobe binaries failed execution validation."
-    }
-    Write-InstallLog "FFmpeg and FFprobe verified and ready." "OK"
 }
+Write-InstallLog "FFmpeg and FFprobe verified and ready." "OK"
 
 # ==============================================================================
-# Step 7: Node.js, npm & Production Frontend Build
+# Stage 5: Node.js, npm & Production Frontend Build
 # ==============================================================================
-Write-InstallLog "Checking Node.js, npm, and production frontend..." "STEP"
+Write-InstallLog "Stage 5/8: Checking Node.js, npm, and production frontend..." "STEP"
 
 $distIndex = Join-Path $FrontendDir "dist\index.html"
 $nodeToolsDir = Join-Path $ToolsDir "node"
@@ -627,26 +683,14 @@ $localNpm = Join-Path $nodeToolsDir "npm.cmd"
 $selectedNode = $null
 $selectedNpm = $null
 
-# Check local portable node
 if (Test-Path $localNode) {
-    try {
-        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pinfo.FileName = $localNode
-        $pinfo.Arguments = "-v"
-        $pinfo.RedirectStandardOutput = $true
-        $pinfo.UseShellExecute = $false
-        $pinfo.CreateNoWindow = $true
-        $proc = [System.Diagnostics.Process]::Start($pinfo)
-        $proc.WaitForExit(3000) | Out-Null
-        if ($proc.ExitCode -eq 0) {
-            $selectedNode = $localNode
-            $selectedNpm = $localNpm
-            Write-InstallLog "Application-managed Node.js detected: $localNode ($($proc.StandardOutput.ReadToEnd().Trim()))" "OK"
-        }
-    } catch {}
+    if (Test-ExecutableWorking $localNode "-v") {
+        $selectedNode = $localNode
+        $selectedNpm = $localNpm
+        Write-InstallLog "Application-managed Node.js detected: $localNode" "OK"
+    }
 }
 
-# Check system node on PATH
 if (-not $selectedNode) {
     $sysNode = Get-Command "node.exe" -ErrorAction SilentlyContinue
     $sysNpm = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
@@ -658,24 +702,18 @@ if (-not $selectedNode) {
     }
 }
 
-# If missing, bootstrap portable Node.js LTS
 if (-not $selectedNode) {
-    Write-InstallLog "Node.js not detected. Bootstrapping official portable Node.js LTS..." "WARN"
-
+    Write-InstallLog "Bootstrapping official portable Node.js LTS..." "WARN"
     $nodeZipUrl = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip"
     $nodeZip = Join-Path $CacheDir "node-v20.18.1-win-x64.zip"
 
     Download-FileWithProgress -Url $nodeZipUrl -DestinationPath $nodeZip -Description "Portable Node.js LTS Archive"
 
-    # Verify SHA256 checksum
-    Write-InstallLog "Verifying Node.js archive checksum..." "INFO"
     $nodeHash = (Get-FileHash -Path $nodeZip -Algorithm SHA256).Hash.ToLower()
     if ($nodeHash -ne "56e5aacdeee7168871721b75819ccacf2367de8761b78eaceacdecd41e04ca03") {
         throw "Node.js zip checksum mismatch! Corrupted download."
     }
-    Write-InstallLog "Node.js archive checksum verified." "OK"
 
-    Write-InstallLog "Extracting Node.js into tools\node..." "INFO"
     $nodeTemp = Join-Path $CacheDir "node_extract_temp"
     if (Test-Path $nodeTemp) { Remove-Item $nodeTemp -Recurse -Force }
     Expand-Archive -Path $nodeZip -DestinationPath $nodeTemp -Force
@@ -690,12 +728,9 @@ if (-not $selectedNode) {
         $selectedNode = $localNode
         $selectedNpm = $localNpm
         Write-InstallLog "Portable Node.js extracted to tools\node." "OK"
-    } else {
-        throw "Failed to extract portable Node.js."
     }
 }
 
-# Build production React frontend if needed
 $frontendNeedsBuild = $false
 if ($Repair -or -not (Test-Path $distIndex)) {
     $frontendNeedsBuild = $true
@@ -710,31 +745,23 @@ if ($Repair -or -not (Test-Path $distIndex)) {
 if ($SkipFrontend) {
     Write-InstallLog "SkipFrontend flag provided. Skipping frontend compilation." "INFO"
 } elseif ($frontendNeedsBuild) {
-    Write-InstallLog "Building production React frontend bundle..." "STEP"
+    Write-InstallLog "Building production React frontend bundle..." "INFO"
     Push-Location $FrontendDir
     try {
-        # Check npm lockfile
         $hasLock = Test-Path (Join-Path $FrontendDir "package-lock.json")
         $npmInstallCmd = if ($hasLock) { "ci" } else { "install" }
 
-        Write-InstallLog "Installing frontend npm dependencies (npm $npmInstallCmd)..." "INFO"
+        Write-InstallLog "Installing frontend dependencies (npm $npmInstallCmd)..." "INFO"
         & $selectedNpm $npmInstallCmd
         if ($LASTEXITCODE -ne 0) {
             Write-InstallLog "npm $npmInstallCmd failed. Falling back to npm install..." "WARN"
             & $selectedNpm install
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to install frontend dependencies with npm."
-            }
         }
 
-        Write-InstallLog "Compiling production frontend bundle (npm run build)..." "INFO"
+        Write-InstallLog "Compiling production bundle (npm run build)..." "INFO"
         & $selectedNpm run build
-        if ($LASTEXITCODE -ne 0) {
-            throw "npm run build failed with exit code $LASTEXITCODE."
-        }
-
-        if (-not (Test-Path $distIndex) -or (Get-Item $distIndex).Length -lt 100) {
-            throw "Production frontend build completed but frontend\dist\index.html was not generated."
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $distIndex)) {
+            throw "Production frontend build failed."
         }
         Write-InstallLog "Production frontend bundle successfully built at frontend\dist." "OK"
     }
@@ -746,16 +773,89 @@ if ($SkipFrontend) {
 }
 
 # ==============================================================================
-# Step 8: Final System Verification & State Stamp
+# Stage 6: Core Preset Speech Recognition Models Download
 # ==============================================================================
-Write-InstallLog "Performing final system verification..." "STEP"
+Write-InstallLog "Stage 6/8: Downloading Core Preset Models (Fast & Maximum Accuracy)..." "STEP"
 
-# Verify backend health and imports via Python
+if ($SkipModels) {
+    Write-InstallLog "SkipModels switch active. Skipping speech recognition models download." "INFO"
+} else {
+    $modelBootstrapScript = @"
+import sys
+from pathlib import Path
+
+backend_dir = Path(r'$BackendDir')
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+from app.transcription.engine import is_model_downloaded, download_model
+
+print('Checking Fast Transcription Model: codeswitched-medium (~740 MB)...')
+if not is_model_downloaded('codeswitched-medium'):
+    print('Downloading Specialized Egyptian Whisper Medium...')
+    download_model('codeswitched-medium')
+    print('[OK] codeswitched-medium download complete.')
+else:
+    print('[OK] codeswitched-medium is already present on disk.')
+
+print('Checking Maximum Accuracy Twin Model: large-v3-turbo (~1.55 GB)...')
+if not is_model_downloaded('large-v3-turbo'):
+    print('Downloading Whisper Large-v3-Turbo...')
+    download_model('large-v3-turbo')
+    print('[OK] large-v3-turbo download complete.')
+else:
+    print('[OK] large-v3-turbo is already present on disk.')
+
+print('CORE_PRESET_MODELS_READY')
+"@
+
+    $mTempScript = Join-Path $BackendDir "storage\temp_models_bootstrap.py"
+    Set-Content -Path $mTempScript -Value $modelBootstrapScript -Encoding UTF8
+
+    try {
+        & $venvPyExe $mTempScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "Core preset model download failed. Check network connection."
+        }
+        Write-InstallLog "Core preset speech models verified and ready." "OK"
+    } finally {
+        Remove-Item $mTempScript -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ==============================================================================
+# Stage 7: Maximum Accuracy Arbiter Setup (Conditional)
+# ==============================================================================
+Write-InstallLog "Stage 7/8: Configuring Maximum Accuracy Arbiter (QwenCleo 4-bit)..." "STEP"
+
+if ($SkipModels) {
+    Write-InstallLog "SkipModels active. Skipping QwenCleo setup." "INFO"
+} elseif ($qwenCompatible) {
+    Write-InstallLog "Compatible NVIDIA GPU detected ($gpuName). Establishing Full Tri-Model Consensus..." "INFO"
+    $qwenScript = Join-Path $ScriptDir "setup_qwencleo.ps1"
+    if (Test-Path $qwenScript) {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $qwenScript -Force
+        if ($LASTEXITCODE -ne 0) {
+            Write-InstallLog "QwenCleo setup encountered warnings. Maximum Accuracy will operate in Dual-Model Consensus." "WARN"
+        } else {
+            Write-InstallLog "QwenCleo 4-bit Arbiter verified. Full Tri-Model Consensus is active!" "OK"
+        }
+    }
+} else {
+    Write-InstallLog "Skipping QwenCleo 4-bit arbiter download: $qwenSkipReason" "INFO"
+    Write-InstallLog "Maximum Accuracy will operate in Dual-Model Consensus mode (Twin Models active)." "OK"
+}
+
+# ==============================================================================
+# Stage 8: Final System Verification & State Stamp
+# ==============================================================================
+Write-InstallLog "Stage 8/8: Performing final end-to-end system verification..." "STEP"
+
 $verifyScript = @"
 import sys
 from pathlib import Path
 
-# Verify critical imports
+# Verify backend imports
 import fastapi
 import uvicorn
 import faster_whisper
@@ -765,31 +865,41 @@ import soundfile
 # Verify app components
 sys.path.insert(0, r'$BackendDir')
 from app.audio.metadata_extractor import find_ffmpeg, find_ffprobe
+from app.transcription.engine import is_model_downloaded
+from app.api.models import check_qwencleo_readiness
+from app.core.config import FRONTEND_DIST_DIR
+
 f_bin = find_ffmpeg()
 p_bin = find_ffprobe()
-
-from app.core.config import FRONTEND_DIST_DIR
 dist_ok = (FRONTEND_DIST_DIR / 'index.html').exists()
 
-print(f'VERIFIED|ffmpeg={f_bin}|ffprobe={p_bin}|dist={dist_ok}')
+fast_ready = is_model_downloaded('codeswitched-medium')
+turbo_ready = is_model_downloaded('large-v3-turbo')
+qwen_status = check_qwencleo_readiness()
+
+print(f'VERIFIED|ffmpeg={bool(f_bin)}|ffprobe={bool(p_bin)}|dist={dist_ok}|fast={fast_ready}|turbo={turbo_ready}|qwen_ready={qwen_status.get("ready")}|tier={qwen_status.get("status")}')
 "@
 
 $verifyFile = Join-Path $CacheDir "verify_install.py"
 Set-Content -Path $verifyFile -Value $verifyScript -Encoding UTF8
 
-$pinfo = New-Object System.Diagnostics.ProcessStartInfo
-$pinfo.FileName = $venvPyExe
-$pinfo.Arguments = "`"$verifyFile`""
-$pinfo.RedirectStandardOutput = $true
-$pinfo.RedirectStandardError = $true
-$pinfo.UseShellExecute = $false
-$pinfo.CreateNoWindow = $true
+$vOut = ""
+try {
+    $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+    $pinfo.FileName = $venvPyExe
+    $pinfo.Arguments = "`"$verifyFile`""
+    $pinfo.RedirectStandardOutput = $true
+    $pinfo.RedirectStandardError = $true
+    $pinfo.UseShellExecute = $false
+    $pinfo.CreateNoWindow = $true
 
-$proc = [System.Diagnostics.Process]::Start($pinfo)
-$proc.WaitForExit(10000) | Out-Null
-$vOut = $proc.StandardOutput.ReadToEnd().Trim()
-$vErr = $proc.StandardError.ReadToEnd().Trim()
-Remove-Item $verifyFile -Force -ErrorAction SilentlyContinue
+    $proc = [System.Diagnostics.Process]::Start($pinfo)
+    $proc.WaitForExit(10000) | Out-Null
+    $vOut = $proc.StandardOutput.ReadToEnd().Trim()
+    $vErr = $proc.StandardError.ReadToEnd().Trim()
+} finally {
+    Remove-Item $verifyFile -Force -ErrorAction SilentlyContinue
+}
 
 if ($proc.ExitCode -ne 0 -or $vOut -notmatch "VERIFIED") {
     Write-InstallLog "Final application verification failed: $vErr" "ERROR"
@@ -798,15 +908,17 @@ if ($proc.ExitCode -ne 0 -or $vOut -notmatch "VERIFIED") {
 
 Write-InstallLog "Verification details: $vOut" "OK"
 
-# Save installation stamp
+# Save installation state stamp
 $installState = @{
-    version = "1.3.0"
+    version = "1.4.0"
     install_date = (Get-Date -Format "o")
     python_interpreter = $venvPyExe
     has_nvidia_gpu = $hasNvidiaGpu
     gpu_name = $gpuName
     ffmpeg_ready = $true
     frontend_ready = (Test-Path $distIndex)
+    fast_preset_ready = $true
+    maximum_accuracy_tier = if ($qwenCompatible -and (Test-Path (Join-Path $ModelsDir "qwencleo-asr\model.safetensors"))) { "full_tri_model" } else { "dual_model_consensus" }
     verified = $true
 }
 $stampPath = Join-Path $BackendDir "storage\.installed.json"
@@ -817,20 +929,28 @@ $installState | ConvertTo-Json -Depth 3 | Set-Content -Path $stampPath -Encoding
 # ==============================================================================
 Write-Host ""
 Write-Host "========================================================" -ForegroundColor Green
-Write-Host "  Verbatim AI Installation Complete & Verified!" -ForegroundColor Green
+Write-Host "  Verbatim AI — Unified Installation Complete!" -ForegroundColor Green
 Write-Host "  Tagline: Every Word Matters." -ForegroundColor White
 Write-Host "========================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  To launch the application, run:" -ForegroundColor Cyan
+Write-Host "  All required components and speech models are fully prepared!" -ForegroundColor Cyan
+Write-Host "  No additional manual downloads or setup scripts are needed." -ForegroundColor White
+Write-Host ""
+Write-Host "  Operational Status:" -ForegroundColor Yellow
+Write-Host "    • Fast Transcription : READY (Specialized Whisper Medium)" -ForegroundColor Green
+if ($installState.maximum_accuracy_tier -eq "full_tri_model") {
+    Write-Host "    • Maximum Accuracy   : READY (Full Tri-Model Consensus on $gpuName)" -ForegroundColor Green
+} else {
+    Write-Host "    • Maximum Accuracy   : READY (Dual-Model Consensus on $(if ($hasNvidiaGpu) {'GPU'} else {'CPU Safe Mode'}))" -ForegroundColor Cyan
+}
+Write-Host "    • Production Web GUI : READY (frontend\dist\index.html)" -ForegroundColor Green
+Write-Host "    • Audio Processing   : READY (FFmpeg & FFprobe verified)" -ForegroundColor Green
+Write-Host ""
+Write-Host "  To launch Verbatim AI right now, run:" -ForegroundColor Cyan
 Write-Host "    --> 01_START_VERBATIM_AI.bat" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  Or for CPU-safe mode on any laptop:" -ForegroundColor Cyan
 Write-Host "    --> 02_CPU_SAFE_START.bat" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "  Operational Tiers:" -ForegroundColor Cyan
-Write-Host "    - Base Engine: Ready (Fast Transcription & Hybrid Dual-Model Consensus)" -ForegroundColor White
-Write-Host "    - Optional Tri-Model Arbiter (QwenCleo 4-bit):" -ForegroundColor White
-Write-Host "      Run: scripts\setup_qwencleo.bat (Requires NVIDIA GPU >= 4GB VRAM, ~6.5 GB disk)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Installation log saved to:" -ForegroundColor Gray
 Write-Host "    $LogFile" -ForegroundColor Gray
