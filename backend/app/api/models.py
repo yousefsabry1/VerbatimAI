@@ -74,10 +74,11 @@ def get_gpu_hardware_info() -> Dict[str, Any]:
     }
 
 
-def check_qwencleo_readiness() -> Dict[str, Any]:
+def check_qwencleo_readiness(verify_runtime: bool = False) -> Dict[str, Any]:
     """
     Evaluates runtime and hardware readiness of QwenCleo 4-bit arbiter.
     Verifies isolated experimental_venv, quantized model weights, and NVIDIA CUDA GPU.
+    Optionally performs active runtime import check in experimental_venv.
     """
     project_root = Path(__file__).resolve().parent.parent.parent.parent
     exp_py = project_root / "experimental_venv" / "Scripts" / "python.exe"
@@ -94,6 +95,28 @@ def check_qwencleo_readiness() -> Dict[str, Any]:
     gpu_supported = has_cuda and (vram_mb >= 3500)
     ready = env_ready and model_ready and gpu_supported
 
+    runtime_verified = False
+    runtime_error_msg = None
+
+    if ready and verify_runtime:
+        import subprocess
+        try:
+            cmd = [
+                str(exp_py),
+                "-c",
+                "import sys, torch; from transformers import BitsAndBytesConfig; import qwen_asr; print('VERIFY_QWEN_OK')",
+            ]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+            if p.returncode == 0 and "VERIFY_QWEN_OK" in p.stdout:
+                runtime_verified = True
+            else:
+                ready = False
+                err_detail = (p.stderr.strip() or p.stdout.strip())[:250]
+                runtime_error_msg = err_detail
+        except Exception as e:
+            ready = False
+            runtime_error_msg = str(e)[:250]
+
     if ready:
         status = "ready"
         reason = f"QwenCleo 4-bit arbiter is fully configured on {gpu_name} ({vram_mb} MB VRAM)."
@@ -106,6 +129,9 @@ def check_qwencleo_readiness() -> Dict[str, Any]:
     elif not model_ready:
         status = "model_missing"
         reason = f"Model weights not found at {model_dir}. Run scripts/setup_qwencleo.bat to download (~3.8 GB)."
+    elif runtime_error_msg:
+        status = "runtime_error"
+        reason = f"QwenCleo runtime dependency check failed in experimental_venv: {runtime_error_msg}"
     else:
         status = "unconfigured"
         reason = "QwenCleo optional components not fully configured."
@@ -119,6 +145,7 @@ def check_qwencleo_readiness() -> Dict[str, Any]:
         "vram_mb": vram_mb,
         "status": status,
         "reason": reason,
+        "runtime_verified": runtime_verified,
         "disk_requirement_gb": 6.5,
         "vram_requirement_mb": 4096,
     }

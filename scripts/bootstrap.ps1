@@ -853,6 +853,7 @@ Write-InstallLog "Stage 8/8: Performing final end-to-end system verification..."
 
 $verifyScript = @"
 import sys
+import json
 from pathlib import Path
 
 # Verify backend imports
@@ -875,15 +876,30 @@ dist_ok = (FRONTEND_DIST_DIR / 'index.html').exists()
 
 fast_ready = is_model_downloaded('codeswitched-medium')
 turbo_ready = is_model_downloaded('large-v3-turbo')
-qwen_status = check_qwencleo_readiness()
+qwen_status = check_qwencleo_readiness(verify_runtime=True)
+
+payload = {
+    "status": "VERIFIED",
+    "ffmpeg": bool(f_bin),
+    "ffprobe": bool(p_bin),
+    "dist": bool(dist_ok),
+    "fast": bool(fast_ready),
+    "turbo": bool(turbo_ready),
+    "qwen_ready": bool(qwen_status.get("ready")),
+    "qwen_status": qwen_status.get("status"),
+    "qwen_reason": qwen_status.get("reason"),
+    "qwen_runtime_verified": bool(qwen_status.get("runtime_verified")),
+}
 
 print(f'VERIFIED|ffmpeg={bool(f_bin)}|ffprobe={bool(p_bin)}|dist={dist_ok}|fast={fast_ready}|turbo={turbo_ready}|qwen_ready={qwen_status.get("ready")}|tier={qwen_status.get("status")}')
+print('__VERIFIED_JSON__' + json.dumps(payload))
 "@
 
 $verifyFile = Join-Path $CacheDir "verify_install.py"
 Set-Content -Path $verifyFile -Value $verifyScript -Encoding UTF8
 
 $vOut = ""
+$vErr = ""
 try {
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
     $pinfo.FileName = $venvPyExe
@@ -894,32 +910,88 @@ try {
     $pinfo.CreateNoWindow = $true
 
     $proc = [System.Diagnostics.Process]::Start($pinfo)
-    $proc.WaitForExit(10000) | Out-Null
+    $proc.WaitForExit(35000) | Out-Null
     $vOut = $proc.StandardOutput.ReadToEnd().Trim()
     $vErr = $proc.StandardError.ReadToEnd().Trim()
 } finally {
     Remove-Item $verifyFile -Force -ErrorAction SilentlyContinue
 }
 
-if ($proc.ExitCode -ne 0 -or $vOut -notmatch "VERIFIED") {
-    Write-InstallLog "Final application verification failed: $vErr" "ERROR"
+if ($proc.ExitCode -ne 0) {
+    Write-InstallLog "Final application verification failed with exit code $($proc.ExitCode): $vErr" "ERROR"
     exit 1
 }
 
-Write-InstallLog "Verification details: $vOut" "OK"
+$jsonMatch = [regex]::Match($vOut, '__VERIFIED_JSON__(.*)')
+if (-not $jsonMatch.Success) {
+    Write-InstallLog "Final verification output missing structured JSON payload: $vOut $vErr" "ERROR"
+    exit 1
+}
 
-# Save installation state stamp
+$vObj = $null
+try {
+    $vObj = $jsonMatch.Groups[1].Value | ConvertFrom-Json
+} catch {
+    Write-InstallLog "Failed to parse verification JSON payload: $_" "ERROR"
+    exit 1
+}
+
+# 1. Assert mandatory media dependencies
+if (-not $vObj.ffmpeg -or -not $vObj.ffprobe) {
+    Write-InstallLog "Verification assertion failed: FFmpeg (found=$($vObj.ffmpeg)) or FFprobe (found=$($vObj.ffprobe)) is missing or non-executable." "ERROR"
+    exit 1
+}
+
+# 2. Assert frontend production bundle unless explicitly skipped
+if (-not $SkipFrontend -and -not $vObj.dist) {
+    Write-InstallLog "Verification assertion failed: Frontend production build (dist/index.html) is missing. Build frontend or run with -SkipFrontend." "ERROR"
+    exit 1
+}
+
+# 3. Assert core speech models unless explicitly skipped
+if (-not $SkipModels) {
+    if (-not $vObj.fast) {
+        Write-InstallLog "Verification assertion failed: Fast speech model (codeswitched-medium) is not downloaded or incomplete." "ERROR"
+        exit 1
+    }
+    if (-not $vObj.turbo) {
+        Write-InstallLog "Verification assertion failed: Turbo speech model (large-v3-turbo) is not downloaded or incomplete." "ERROR"
+        exit 1
+    }
+}
+
+Write-InstallLog "Verification assertions passed." "OK"
+Write-InstallLog "Verification details: ffmpeg=$($vObj.ffmpeg), ffprobe=$($vObj.ffprobe), dist=$($vObj.dist), fast=$($vObj.fast), turbo=$($vObj.turbo), qwen_ready=$($vObj.qwen_ready)" "INFO"
+
+# Derive truthful installation state stamp from real verification results
+$isPartial = [bool]($SkipFrontend -or $SkipModels -or (-not $vObj.dist) -or (-not $vObj.fast) -or (-not $vObj.turbo))
+
+$maxTier = if ($vObj.qwen_ready) {
+    "full_tri_model"
+} elseif ($vObj.fast -and $vObj.turbo) {
+    "dual_model_consensus"
+} else {
+    "needs_models"
+}
+
 $installState = @{
     version = "1.4.0"
     install_date = (Get-Date -Format "o")
     python_interpreter = $venvPyExe
     has_nvidia_gpu = $hasNvidiaGpu
     gpu_name = $gpuName
-    ffmpeg_ready = $true
-    frontend_ready = (Test-Path $distIndex)
-    fast_preset_ready = $true
-    maximum_accuracy_tier = if ($qwenCompatible -and (Test-Path (Join-Path $ModelsDir "qwencleo-asr\model.safetensors"))) { "full_tri_model" } else { "dual_model_consensus" }
-    verified = $true
+    ffmpeg_ready = [bool]($vObj.ffmpeg -and $vObj.ffprobe)
+    frontend_ready = [bool]$vObj.dist
+    fast_preset_ready = [bool]$vObj.fast
+    turbo_preset_ready = [bool]$vObj.turbo
+    qwencleo_ready = [bool]$vObj.qwen_ready
+    qwencleo_status = $vObj.qwen_status
+    qwencleo_reason = $vObj.qwen_reason
+    maximum_accuracy_tier = $maxTier
+    partial_install = $isPartial
+    skip_frontend_flag = [bool]$SkipFrontend
+    skip_models_flag = [bool]$SkipModels
+    verified = [bool]($vObj.ffmpeg -and $vObj.ffprobe -and ($SkipFrontend -or $vObj.dist) -and ($SkipModels -or ($vObj.fast -and $vObj.turbo)))
 }
 $stampPath = Join-Path $BackendDir "storage\.installed.json"
 $installState | ConvertTo-Json -Depth 3 | Set-Content -Path $stampPath -Encoding UTF8
@@ -928,23 +1000,52 @@ $installState | ConvertTo-Json -Depth 3 | Set-Content -Path $stampPath -Encoding
 # Completion Banner
 # ==============================================================================
 Write-Host ""
-Write-Host "========================================================" -ForegroundColor Green
-Write-Host "  Verbatim AI — Unified Installation Complete!" -ForegroundColor Green
-Write-Host "  Tagline: Every Word Matters." -ForegroundColor White
-Write-Host "========================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "  All required components and speech models are fully prepared!" -ForegroundColor Cyan
-Write-Host "  No additional manual downloads or setup scripts are needed." -ForegroundColor White
+if ($installState.partial_install) {
+    Write-Host "========================================================" -ForegroundColor Yellow
+    Write-Host "  Verbatim AI — Partial Installation Configured" -ForegroundColor Yellow
+    Write-Host "  Tagline: Every Word Matters." -ForegroundColor White
+    Write-Host "========================================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Note: Some components were skipped (-SkipFrontend or -SkipModels)." -ForegroundColor Yellow
+} else {
+    Write-Host "========================================================" -ForegroundColor Green
+    Write-Host "  Verbatim AI — Unified Installation Complete!" -ForegroundColor Green
+    Write-Host "  Tagline: Every Word Matters." -ForegroundColor White
+    Write-Host "========================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  All required components and speech models are fully prepared!" -ForegroundColor Cyan
+}
 Write-Host ""
 Write-Host "  Operational Status:" -ForegroundColor Yellow
-Write-Host "    • Fast Transcription : READY (Specialized Whisper Medium)" -ForegroundColor Green
+if ($installState.fast_preset_ready) {
+    Write-Host "    • Fast Transcription : READY (Specialized Whisper Medium)" -ForegroundColor Green
+} else {
+    Write-Host "    • Fast Transcription : SKIPPED (run 00_INSTALL.bat without -SkipModels to download)" -ForegroundColor Yellow
+}
+
 if ($installState.maximum_accuracy_tier -eq "full_tri_model") {
     Write-Host "    • Maximum Accuracy   : READY (Full Tri-Model Consensus on $gpuName)" -ForegroundColor Green
-} else {
+} elseif ($installState.maximum_accuracy_tier -eq "dual_model_consensus") {
     Write-Host "    • Maximum Accuracy   : READY (Dual-Model Consensus on $(if ($hasNvidiaGpu) {'GPU'} else {'CPU Safe Mode'}))" -ForegroundColor Cyan
+    if ($vObj.qwen_status -ne "ready") {
+        Write-Host "                           [QwenCleo: $($vObj.qwen_reason)]" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "    • Maximum Accuracy   : INCOMPLETE (speech models skipped or missing)" -ForegroundColor Yellow
 }
-Write-Host "    • Production Web GUI : READY (frontend\dist\index.html)" -ForegroundColor Green
-Write-Host "    • Audio Processing   : READY (FFmpeg & FFprobe verified)" -ForegroundColor Green
+
+if ($installState.frontend_ready) {
+    Write-Host "    • Production Web GUI : READY (frontend\dist\index.html)" -ForegroundColor Green
+} else {
+    Write-Host "    • Production Web GUI : SKIPPED (run 00_INSTALL.bat without -SkipFrontend to build)" -ForegroundColor Yellow
+}
+
+if ($installState.ffmpeg_ready) {
+    Write-Host "    • Audio Processing   : READY (FFmpeg & FFprobe verified)" -ForegroundColor Green
+} else {
+    Write-Host "    • Audio Processing   : FAILED (FFmpeg/FFprobe missing)" -ForegroundColor Red
+}
+
 Write-Host ""
 Write-Host "  To launch Verbatim AI right now, run:" -ForegroundColor Cyan
 Write-Host "    --> 01_START_VERBATIM_AI.bat" -ForegroundColor Yellow
@@ -954,7 +1055,7 @@ Write-Host "    --> 02_CPU_SAFE_START.bat" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  Installation log saved to:" -ForegroundColor Gray
 Write-Host "    $LogFile" -ForegroundColor Gray
-Write-Host "========================================================" -ForegroundColor Green
+Write-Host "========================================================" -ForegroundColor $(if ($installState.partial_install) {'Yellow'} else {'Green'})
 Write-Host ""
 
 exit 0
