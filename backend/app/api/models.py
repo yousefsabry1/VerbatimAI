@@ -25,8 +25,15 @@ def list_models():
         download_progress = _DOWNLOADING_MODELS.get(m_id, {}).get("progress", 0.0)
         status_msg = _DOWNLOADING_MODELS.get(m_id, {}).get("message", "")
 
+        approx_download_gb = info.get("approx_download_gb", 0.0)
+        if m_id in ("hybrid-v1", "hybrid-v2", "hybrid-v3"):
+            cs_size = SUPPORTED_MODELS.get("codeswitched-medium", {}).get("approx_download_gb", 0.78)
+            tb_size = SUPPORTED_MODELS.get("large-v3-turbo", {}).get("approx_download_gb", 1.6)
+            approx_download_gb = round(cs_size + tb_size, 2)
+
         results.append({
             **info,
+            "approx_download_gb": approx_download_gb,
             "is_downloaded": downloaded,
             "folder_size_gb": size_gb,
             "is_downloading": is_downloading,

@@ -83,6 +83,13 @@ dd.mp3
 *.mkv
 *.mov
 
+# Tools, Logs & Install State
+tools/
+logs/
+*.log
+backend/storage/.installed.json
+storage/.installed.json
+
 # Environment & Secrets
 .env
 .env.local

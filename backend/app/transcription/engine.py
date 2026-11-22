@@ -105,7 +105,25 @@ def download_model(model_id: str, progress_callback: Optional[Callable[[float, s
         raise ValueError(f"Unknown model identifier: {model_id}")
 
     if model_id in ("hybrid-v1", "hybrid-v2", "hybrid-v3"):
-        raise RuntimeError(f"Hybrid ASR model {model_id} combines existing installed models and does not require separate download.")
+        if progress_callback:
+            progress_callback(0.05, f"Initializing twin model download for {SUPPORTED_MODELS[model_id]['name']}...")
+        if not is_model_downloaded("codeswitched-medium"):
+            if progress_callback:
+                progress_callback(0.10, "Downloading Component 1/2: Specialized Egyptian Whisper Medium...")
+            download_model(
+                "codeswitched-medium",
+                progress_callback=lambda p, m: progress_callback(0.10 + p * 0.45, f"Component 1/2: {m}") if progress_callback else None
+            )
+        if not is_model_downloaded("large-v3-turbo"):
+            if progress_callback:
+                progress_callback(0.55, "Downloading Component 2/2: Whisper Large-v3-Turbo...")
+            download_model(
+                "large-v3-turbo",
+                progress_callback=lambda p, m: progress_callback(0.55 + p * 0.45, f"Component 2/2: {m}") if progress_callback else None
+            )
+        if progress_callback:
+            progress_callback(1.0, f"{SUPPORTED_MODELS[model_id]['name']} ready.")
+        return get_model_dir("codeswitched-medium")
 
     if model_id == "qwencleo-asr-4bit":
         raise RuntimeError(

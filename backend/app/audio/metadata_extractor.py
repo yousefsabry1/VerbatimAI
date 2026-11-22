@@ -1,3 +1,4 @@
+import os
 import json
 import shutil
 import subprocess
@@ -9,10 +10,38 @@ logger = logging.getLogger(__name__)
 
 
 def find_ffprobe() -> str:
+    # 1. Direct environment variable override
+    env_probe = os.environ.get("VERBATIM_FFPROBE_PATH")
+    if env_probe and Path(env_probe).is_file():
+        return str(Path(env_probe).resolve())
+
+    # 2. System PATH
     path = shutil.which("ffprobe")
     if path:
         return path
-    # Check default common Windows paths or imageio_ffmpeg
+
+    # 3. Project-managed tools directories
+    project_root = Path(__file__).resolve().parents[3]
+    candidate_locations = [
+        project_root / "tools" / "ffmpeg" / "bin" / "ffprobe.exe",
+        project_root / "tools" / "ffmpeg" / "ffprobe.exe",
+        project_root / "bin" / "ffprobe.exe",
+        project_root / "backend" / "tools" / "ffmpeg" / "bin" / "ffprobe.exe",
+    ]
+    for cand in candidate_locations:
+        if cand.is_file():
+            return str(cand.resolve())
+
+    # 4. Sibling to ffmpeg
+    try:
+        ffmpeg_bin = find_ffmpeg()
+        sibling = Path(ffmpeg_bin).parent / "ffprobe.exe"
+        if sibling.is_file():
+            return str(sibling.resolve())
+    except Exception:
+        pass
+
+    # 5. Check imageio_ffmpeg parent directory if present
     try:
         import imageio_ffmpeg
         ffmpeg_exe = Path(imageio_ffmpeg.get_ffmpeg_exe())
@@ -21,19 +50,47 @@ def find_ffprobe() -> str:
             return str(ffprobe_exe)
     except Exception:
         pass
-    raise RuntimeError("ffprobe was not found on system PATH. Please ensure FFmpeg is installed.")
+
+    raise RuntimeError(
+        "ffprobe was not found on system PATH or in application tools directory. "
+        "Please run 00_INSTALL.bat to install FFmpeg automatically."
+    )
 
 
 def find_ffmpeg() -> str:
+    # 1. Direct environment variable override
+    env_ffmpeg = os.environ.get("VERBATIM_FFMPEG_PATH")
+    if env_ffmpeg and Path(env_ffmpeg).is_file():
+        return str(Path(env_ffmpeg).resolve())
+
+    # 2. System PATH
     path = shutil.which("ffmpeg")
     if path:
         return path
+
+    # 3. Project-managed tools directories
+    project_root = Path(__file__).resolve().parents[3]
+    candidate_locations = [
+        project_root / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
+        project_root / "tools" / "ffmpeg" / "ffmpeg.exe",
+        project_root / "bin" / "ffmpeg.exe",
+        project_root / "backend" / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
+    ]
+    for cand in candidate_locations:
+        if cand.is_file():
+            return str(cand.resolve())
+
+    # 4. imageio_ffmpeg fallback
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         pass
-    raise RuntimeError("ffmpeg was not found on system PATH. Please ensure FFmpeg is installed.")
+
+    raise RuntimeError(
+        "ffmpeg was not found on system PATH or in application tools directory. "
+        "Please run 00_INSTALL.bat to install FFmpeg automatically."
+    )
 
 
 def extract_metadata(file_path: Path) -> Dict[str, Any]:

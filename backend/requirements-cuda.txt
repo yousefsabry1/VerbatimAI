@@ -1,0 +1,5 @@
+# VerbatimAI - Optional CUDA GPU Dependencies
+# Installed automatically only on systems with NVIDIA GPUs and CUDA support
+nvidia-cublas-cu12>=12.1.0; platform_system == "Windows" or platform_system == "Linux"
+nvidia-cudnn-cu12>=9.0.0; platform_system == "Windows" or platform_system == "Linux"
+nvidia-cuda-nvrtc-cu12>=12.1.0; platform_system == "Windows" or platform_system == "Linux"

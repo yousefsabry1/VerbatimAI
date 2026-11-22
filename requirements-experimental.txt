@@ -1,0 +1,10 @@
+# VerbatimAI - Maximum Accuracy & Experimental Hybrid V3 / QwenCleo Dependencies
+# Isolated in experimental_venv to prevent dependency collision with Faster-Whisper
+torch>=2.2.0
+torchaudio>=2.2.0
+transformers>=4.40.0
+accelerate>=0.28.0
+bitsandbytes>=0.43.0
+qwen-asr>=0.0.6
+soundfile>=0.12.0
+numpy>=1.24.0,<3.0.0

@@ -439,6 +439,18 @@ def run_hybrid_transcription(
     total_duration = max(float(source_meta.get("duration") or 45.0), 1.0)
     prompt = vocabulary_hints.strip() if (vocabulary_hints and vocabulary_hints.strip()) else None
 
+    # Verify required twin models are downloaded before inference begins
+    missing_models = []
+    if not is_model_downloaded("codeswitched-medium"):
+        missing_models.append("codeswitched-medium (Egyptian Specialized)")
+    if not is_model_downloaded("large-v3-turbo"):
+        missing_models.append("large-v3-turbo (Whisper Large Turbo)")
+    if missing_models:
+        raise RuntimeError(
+            f"Hybrid mode ({model_id}) requires twin models to be downloaded first: "
+            f"{', '.join(missing_models)}. Please download them from the Model Selection panel before transcribing."
+        )
+
     # Step 1: Model 1 — Specialized Whisper Medium
     if progress_callback:
         progress_callback(0.12, "Hybrid Pass 1/3: Transcribing with Specialized Whisper Medium (CUDA)...")
